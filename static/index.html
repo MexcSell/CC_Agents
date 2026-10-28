@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Group</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23c2603d'/%3E%3Cpath d='M16 6l8 10-8 10-8-10z' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <nav id="sidebar">
+      <div class="brand"><span class="logo">◆</span><span class="txt">Agent Group</span></div>
+      <a class="nav" href="#/" data-nav="dashboard"><span class="ico">▦</span><span class="lbl">Dashboard</span></a>
+      <a class="nav" href="#/chat" data-nav="chat"><span class="ico">💬</span><span class="lbl">Chat</span></a>
+      <a class="nav" href="#/projects" data-nav="projects"><span class="ico">📋</span><span class="lbl">Projects</span></a>
+      <a class="nav" href="#/files" data-nav="files"><span class="ico">🗂</span><span class="lbl">Files</span></a>
+      <a class="nav" href="#/dev" data-nav="dev"><span class="ico">🛠</span><span class="lbl">Developer</span></a>
+      <a class="nav" href="#/settings" data-nav="settings"><span class="ico">⚙</span><span class="lbl">Settings</span></a>
+      <div class="sidebar-foot">
+        <div id="server-status"><span class="dot"></span>connecting…</div>
+        <div id="run-status"></div>
+      </div>
+    </nav>
+    <main id="view"></main>
+  </div>
+  <div id="toasts"></div>
+  <div id="banner" hidden></div>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
