@@ -92,6 +92,9 @@ CREATE INDEX IF NOT EXISTS idx_conv_kind ON conversations(kind, topic_id, task_i
 
 with _lock:
     _conn.executescript(SCHEMA)
+    # Migrations for databases created by earlier versions.
+    if "engine" not in {r["name"] for r in _conn.execute("PRAGMA table_info(messages)")}:
+        _conn.execute("ALTER TABLE messages ADD COLUMN engine TEXT NOT NULL DEFAULT 'api'")
 
 
 def now() -> str:
@@ -134,6 +137,7 @@ class _Tx:
 # ---------------------------------------------------------------- settings
 
 DEFAULT_SETTINGS = {
+    "engine": "claude_code",     # "claude_code" (local Claude Code login) or "api" (Anthropic API key)
     "api_key": "",
     "chat_model": "claude-opus-5-5",
     "chat_effort": "medium",
@@ -186,21 +190,31 @@ def get_conversation(cid: int) -> dict | None:
 
 
 def list_messages(cid: int) -> list[dict]:
-    rows = query("SELECT id, role, content, created_at FROM messages WHERE conversation_id = ? ORDER BY id", (cid,))
+    rows = query("SELECT id, role, content, engine, created_at FROM messages WHERE conversation_id = ? ORDER BY id",
+                 (cid,))
     for r in rows:
         r["content"] = json.loads(r["content"])
     return rows
 
 
-def add_message(cid: int, role: str, content) -> int:
+def add_message(cid: int, role: str, content, engine: str = "api") -> int:
+    """Store a message. `engine` records which engine produced it ("api" or "claude_code")."""
     ts = now()
     with transaction():
         mid = _conn.execute(
-            "INSERT INTO messages(conversation_id, role, content, created_at) VALUES(?, ?, ?, ?)",
-            (cid, role, json.dumps(content, ensure_ascii=False), ts),
+            "INSERT INTO messages(conversation_id, role, content, engine, created_at) VALUES(?, ?, ?, ?, ?)",
+            (cid, role, json.dumps(content, ensure_ascii=False), engine, ts),
         ).lastrowid
         _conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (ts, cid))
     return mid
+
+
+def update_conversation_options(cid: int, patch: dict) -> dict:
+    with transaction():
+        row = _conn.execute("SELECT options FROM conversations WHERE id = ?", (cid,)).fetchone()
+        options = {**json.loads(row["options"]), **patch} if row else dict(patch)
+        _conn.execute("UPDATE conversations SET options = ? WHERE id = ?", (json.dumps(options), cid))
+    return options
 
 
 # ---------------------------------------------------------------- tasks

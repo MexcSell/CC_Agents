@@ -136,6 +136,8 @@ def get_client() -> anthropic.Anthropic:
 
 
 def describe_error(e: Exception) -> str:
+    if getattr(e, "user_facing", False):
+        return str(e)
     if isinstance(e, anthropic.AuthenticationError):
         return "Authentication failed. Add a valid Anthropic API key in Settings."
     if isinstance(e, anthropic.PermissionDeniedError):
@@ -161,7 +163,11 @@ def describe_error(e: Exception) -> str:
 def _execute(run: Run, spec: AgentSpec) -> None:
     status = "completed"
     try:
-        _loop(run, spec)
+        if spec.engine == "claude_code":
+            from . import claude_code
+            claude_code.run(run, spec)
+        else:
+            _loop(run, spec)
         if run.cancel.is_set():
             status = "cancelled"
     except Exception as e:  # report every failure to the browser, keep the server alive
@@ -206,7 +212,7 @@ def _params(spec: AgentSpec, system: str, history: list) -> dict:
 
 def _loop(run: Run, spec: AgentSpec) -> None:
     conv = db.get_conversation(run.conv_id)
-    history = [{"role": m["role"], "content": m["content"]} for m in db.list_messages(run.conv_id)]
+    history = api_history(db.list_messages(run.conv_id))
     client = get_client()
     json_retries = 0
 
@@ -287,6 +293,25 @@ def _loop(run: Run, spec: AgentSpec) -> None:
 
     run.emit("notice", level="warn",
              text=f"Stopped after {spec.max_turns} agent turns. Send a message to let the agent continue.")
+
+
+def api_history(messages: list[dict]) -> list[dict]:
+    """Stored messages as Messages API input.
+
+    Turns produced by the Claude Code engine used Claude Code's own tools and session, so only
+    their text is replayed; API-engine turns are sent back exactly as they were returned.
+    """
+    history = []
+    for m in messages:
+        content = m["content"]
+        if m.get("engine") == "claude_code":
+            text = content if isinstance(content, str) else "\n\n".join(
+                b["text"] for b in content if b.get("type") == "text" and b.get("text", "").strip())
+            if not text.strip():
+                continue
+            content = [{"type": "text", "text": text}]
+        history.append({"role": m["role"], "content": content})
+    return history
 
 
 def _relay(run: Run, stream) -> None:

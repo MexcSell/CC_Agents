@@ -21,10 +21,23 @@ class AgentSpec:
     workspace: T.Workspace | None = None
     task_id: int | None = None
     max_turns: int = 80
+    engine: str = "api"            # "api" (Messages API, app/runs.py) or "claude_code" (app/claude_code.py)
+    web_search: bool = False
 
     @property
     def tool_index(self) -> dict:
         return {t["name"]: t for t in self.tools if "input_schema" in t}
+
+
+# Appended to a conversation's stored system prompt when it runs on Claude Code, whose tools
+# have different names. Constant per agent kind, so the prompt stays stable across runs.
+CLAUDE_CODE_NOTES = {
+    "dev": "\n\nIn this environment you work with Claude Code's built-in tools (Read, Write, Edit, Glob, Grep, "
+           "Bash; Bash replaces run_command). The Agent Group tools restart_server and read_server_log are named "
+           "mcp__agent__restart_server and mcp__agent__read_server_log.",
+    "task": "\n\nIn this environment you work with Claude Code's built-in tools (Read, Write, Edit, Glob, Grep, "
+            "Bash; Bash replaces run_command). The update_task tool is named mcp__agent__update_task.",
+}
 
 
 # ---------------------------------------------------------------- chat
@@ -43,8 +56,10 @@ def chat_system_prompt(topic: dict | None) -> str:
 
 def chat_spec(conv: dict) -> AgentSpec:
     s = db.get_settings()
-    tools = [T.WEB_SEARCH_TOOL] if conv["options"].get("web_search") else []
-    return AgentSpec(kind="chat", model=s["chat_model"], effort=s["chat_effort"], tools=tools, max_turns=8)
+    web_search = bool(conv["options"].get("web_search"))
+    return AgentSpec(kind="chat", model=s["chat_model"], effort=s["chat_effort"],
+                     tools=[T.WEB_SEARCH_TOOL] if web_search else [], max_turns=8,
+                     engine=s["engine"], web_search=web_search)
 
 
 # ---------------------------------------------------------------- developer
@@ -59,7 +74,8 @@ exits with code 3, and restores the latest snapshot if a restarted server keeps 
 - app/server.py: FastAPI app. REST API under /api, Server-Sent Events for agent runs, serves static/ at /.
 - app/db.py: SQLite schema and helpers (database file in data/).
 - app/agents.py: system prompts and tool sets of the chat, developer and project agents.
-- app/runs.py: run manager and the streaming Claude tool-use loop (Anthropic Python SDK).
+- app/runs.py: run manager and the streaming Claude tool-use loop for the API engine (Anthropic Python SDK).
+- app/claude_code.py: the Claude Code engine (Claude Agent SDK, uses the Claude Code login on this machine).
 - app/tools.py: tool definitions and executors (file tools, shell, task updates, restart).
 - app/fsops.py: filesystem operations behind the file browser and the file tools.
 - app/maintenance.py: source snapshots, preflight check, restart requests, server log.
@@ -94,7 +110,8 @@ def dev_spec() -> AgentSpec:
     ws = T.Workspace(APP_ROOT, allow_commands=s["allow_commands"], protected=DEV_PROTECTED_DIRS,
                      before_write=snapshot_once)
     return AgentSpec(kind="dev", model=s["dev_model"], effort=s["dev_effort"],
-                     tools=T.FILE_TOOLS + T.DEV_TOOLS, workspace=ws, max_turns=s["max_agent_turns"])
+                     tools=T.FILE_TOOLS + T.DEV_TOOLS, workspace=ws, max_turns=s["max_agent_turns"],
+                     engine=s["engine"])
 
 
 # ---------------------------------------------------------------- project agents
@@ -132,7 +149,7 @@ def task_spec(project: dict, task_id: int) -> AgentSpec:
     ws = T.Workspace(project["repo_path"], allow_commands=s["allow_commands"])
     return AgentSpec(kind="task", model=agent["model"], effort=agent["effort"],
                      tools=T.FILE_TOOLS + T.TASK_TOOLS, workspace=ws, task_id=task_id,
-                     max_turns=s["max_agent_turns"])
+                     max_turns=s["max_agent_turns"], engine=s["engine"])
 
 
 def task_record_text(task: dict) -> str:

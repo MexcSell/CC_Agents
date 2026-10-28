@@ -5,7 +5,22 @@ import { api, h, fill, md, renderMarkdown, enhanceMarkdown, fmtBytes, fmtDate, s
 export function toolSummary(name, input) {
   input = input || {};
   const size = s => (typeof s === 'string' ? ` (${fmtBytes(new Blob([s]).size)})` : '');
+  if (name.startsWith('mcp__agent__')) return toolSummary(name.slice('mcp__agent__'.length), input);
   switch (name) {
+    // Claude Code engine tools
+    case 'Read': return `${input.file_path || ''}${input.offset ? `:${input.offset}` : ''}`;
+    case 'Write': return `${input.file_path || ''}${size(input.content)}`;
+    case 'Edit': case 'MultiEdit': return input.file_path || '';
+    case 'NotebookEdit': return input.notebook_path || '';
+    case 'Bash': return `$ ${input.command || ''}`;
+    case 'Glob': return `${input.pattern || ''}${input.path ? ` in ${input.path}` : ''}`;
+    case 'Grep': return `/${input.pattern || ''}/${input.glob ? ` ${input.glob}` : ''}${input.path ? ` in ${input.path}` : ''}`;
+    case 'WebSearch': return input.query || '';
+    case 'WebFetch': return input.url || '';
+    case 'TodoWrite': return `${(input.todos || []).length} to-dos`;
+    case 'Task': case 'Agent': return input.description || '';
+    case 'ToolSearch': return (input.query || '').replace(/^select:/, '');
+    // API engine tools
     case 'list_files': return `${input.path || '.'}${input.depth ? `  depth ${input.depth}` : ''}`;
     case 'read_file': return `${input.path || ''}${input.start_line ? `:${input.start_line}-${input.end_line || ''}` : ''}`;
     case 'write_file': return `${input.path || ''}${size(input.content)}`;
@@ -166,6 +181,7 @@ export class ConversationView {
       case 'fallback':
         return h('div', { class: 'notice info inline-notice' }, `${b.from?.model || 'The model'} declined; continued on ${b.to?.model || 'a fallback model'}.`);
       case 'redacted_thinking':
+      case 'server_tool_result':
         return null;
       default:
         return h('div', { class: 'small muted' }, `[${b.type}]`);
@@ -192,7 +208,7 @@ export class ConversationView {
     const inputBox = h('div');
     const resultBox = h('div');
     const card = h('details', { class: 'tool', 'data-tool-id': id },
-      h('summary', {}, h('span', {}, '🔧'), h('span', { class: 'tname' }, name), arg, stateEl),
+      h('summary', {}, h('span', {}, '🔧'), h('span', { class: 'tname', title: name }, name.replace(/^mcp__agent__/, '')), arg, stateEl),
       h('div', { class: 'tbody' }, inputBox, resultBox));
     card._parts = { stateEl, arg, inputBox, resultBox, name };
     if (input) this.fillToolInput(card, input);

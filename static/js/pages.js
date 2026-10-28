@@ -25,8 +25,10 @@ export async function dashboardPage(view) {
         h('a', { class: 'btn', href: '#/chat' }, '💬 Chat with Claude'),
         h('a', { class: 'btn', href: '#/projects?new=1' }, '📋 Register a project'),
         h('a', { class: 'btn', href: '#/dev' }, '🛠 Change this site')),
-      d.has_credentials ? null : h('div', { class: 'notice warn', style: { marginBottom: '16px' } },
-        'No Anthropic API key is configured yet. ', h('a', { href: '#/settings' }, 'Add one in Settings'), ' so the agents can talk to Claude.'),
+      d.has_credentials ? null : h('div', { class: 'notice warn', style: { marginBottom: '16px' } }, d.engine === 'claude_code'
+        ? ['Claude Code is not logged in on this server. Run ', h('code', {}, 'claude'), ' in a terminal on the server and log in, or ',
+          h('a', { href: '#/settings' }, 'switch to an API key in Settings'), '.']
+        : ['No Anthropic API key is configured yet. ', h('a', { href: '#/settings' }, 'Add one in Settings'), ' so the agents can talk to Claude.']),
       h('div', { class: 'cards', style: { marginBottom: '16px' } },
         stat('Topics', d.topics, '#/chat'),
         stat('Conversations', d.conversations, '#/chat'),
@@ -591,7 +593,7 @@ class TaskDetail {
       h('div', { class: 'card pad-sm' },
         h('div', { class: 'row', style: { marginBottom: '8px' } },
           h('h3', { class: 'grow', style: { margin: 0 } }, `🤖 ${agent.name} — work log`),
-          h('span', { class: 'small muted' }, `${agent.model} · effort ${agent.effort}`)),
+          h('span', { class: 'small muted' }, `${state.info?.engine === 'api' ? 'API' : 'Claude Code'} · ${agent.model} · effort ${agent.effort}`)),
         this.convHost)));
     this.render();
     const started = !!this.task.conversation_id;
@@ -768,11 +770,22 @@ export async function settingsPage(view) {
   };
   const turns = h('input', { type: 'number', min: 1, max: 500, value: s.max_agent_turns, style: { width: '120px' } });
   const keyStatus = s.api_key_set ? `A key ending in ${s.api_key_hint} is saved.` : s.env_key_present ? 'Using ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN from the server environment.' : 'No key configured yet.';
+  fields.engine = h('select', { 'data-key': 'engine' },
+    h('option', { value: 'claude_code', selected: s.engine === 'claude_code' }, 'Claude Code — your Claude subscription'),
+    h('option', { value: 'api', selected: s.engine === 'api' }, 'Anthropic API key — billed per token'));
+  const cc = s.claude_code;
+  const ccStatus = !cc.available
+    ? h('div', { class: 'notice error' }, 'The Claude Code CLI was not found. Run ./start.sh to reinstall the dependencies.')
+    : cc.logged_in
+      ? h('div', { class: 'notice info' }, `✓ Claude Code is logged in on this server (Agent SDK ${cc.sdk_version}).`)
+      : h('div', { class: 'notice warn' }, 'Claude Code is not logged in on this server. Open a terminal on the server, run ',
+        h('code', {}, 'claude'), ' and log in with your Claude account.');
   const save = async () => {
     const body = { max_agent_turns: +turns.value };
     for (const [k, el] of Object.entries(fields)) body[k] = el.type === 'checkbox' ? el.checked : el.value;
     if (key.value.trim()) body.api_key = key.value.trim();
     await api('PUT', '/api/settings', body);
+    if (state.info) state.info.engine = body.engine;
     toast('Settings saved', 'ok');
     go('#/settings');
   };
@@ -781,8 +794,14 @@ export async function settingsPage(view) {
     h('div', { class: 'page-head' }, h('h1', {}, 'Settings')),
     h('div', { class: 'stack' },
       h('div', { class: 'card form-grid' },
-        h('h2', { style: { margin: 0 } }, 'Anthropic API'),
-        field('API key', key, keyStatus + ' The key is stored in the local database (data/agent_group.db).'),
+        h('h2', { style: { margin: 0 } }, 'Engine'),
+        field('Agents run on', fields.engine, 'Claude Code uses the Claude login on this server. Usage counts against your plan’s limits, '
+          + 'which the agents share with your own Claude Code sessions. The API engine bills an API key per token. '
+          + 'Changing the engine also applies to existing conversations from their next message.'),
+        ccStatus),
+      h('div', { class: 'card form-grid' },
+        h('h2', { style: { margin: 0 } }, 'Anthropic API key'),
+        field('API key', key, keyStatus + ' Used only by the API engine. Stored in the local database (data/agent_group.db).'),
         s.api_key_set ? h('div', {}, h('button', {
           class: 'sm danger', onclick: async () => {
             if (!await confirmDialog('Remove the saved API key?', { okLabel: 'Remove', danger: true })) return;
@@ -799,7 +818,7 @@ export async function settingsPage(view) {
       h('div', { class: 'card form-grid' },
         h('h2', { style: { margin: 0 } }, 'Agent behaviour'),
         check('allow_commands', 'Allow agents to run shell commands', 'Developer and project agents can run commands (tests, builds, git) inside their workspace.'),
-        check('use_fallback', 'Refusal fallback', 'If a safety classifier declines a request, the API retries it on a recommended fallback model (not available for Haiku).'),
+        check('use_fallback', 'Refusal fallback (API engine)', 'If a safety classifier declines a request, the API retries it on a recommended fallback model (not available for Haiku).'),
         check('chat_web_search', 'Web search in new chat conversations', 'Lets the chat agent search the web. Applies to conversations started after the change.'),
         field('Maximum agent steps per run', turns, 'A run stops after this many model turns; send a message to let the agent continue.')),
       h('div', {}, h('button', { class: 'primary', onclick: save }, 'Save settings')),

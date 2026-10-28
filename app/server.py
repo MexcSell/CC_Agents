@@ -88,7 +88,7 @@ def system_info():
     return {
         "pid": os.getpid(), "started_at": STARTED_AT, "app_root": str(APP_ROOT), "port": PORT,
         "supervised": maintenance.under_supervisor(), "models": MODELS, "efforts": EFFORTS,
-        "home": str(Path.home()), "python": sys.version.split()[0],
+        "home": str(Path.home()), "python": sys.version.split()[0], "engine": db.get_settings()["engine"],
     }
 
 
@@ -105,6 +105,7 @@ def dashboard():
             "SELECT t.id, t.title, t.status, t.progress, t.updated_at, p.name AS project, p.id AS project_id "
             "FROM tasks t JOIN projects p ON p.id = t.project_id ORDER BY t.updated_at DESC LIMIT 8"),
         "has_credentials": _has_credentials(),
+        "engine": db.get_settings()["engine"],
     }
 
 
@@ -165,9 +166,17 @@ def delete_snapshot(name: str):
 
 # ---------------------------------------------------------------- settings
 
+def _claude_code_status() -> dict:
+    from . import claude_code  # imports the Agent SDK; only needed here and when a run starts
+    return claude_code.status()
+
+
 def _has_credentials() -> bool:
-    return bool(db.get_settings()["api_key"] or os.environ.get("ANTHROPIC_API_KEY")
-                or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+    s = db.get_settings()
+    if s["engine"] == "claude_code":
+        status = _claude_code_status()
+        return status["available"] and status["logged_in"]
+    return bool(s["api_key"] or os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
 
 
 def _public_settings() -> dict:
@@ -176,6 +185,7 @@ def _public_settings() -> dict:
     s["api_key_set"] = bool(key)
     s["api_key_hint"] = f"…{key[-4:]}" if key else ""
     s["env_key_present"] = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+    s["claude_code"] = _claude_code_status()
     return s
 
 
@@ -198,6 +208,10 @@ def put_settings(body: dict = Body(...)):
         elif key.endswith("_effort"):
             if value not in EFFORTS:
                 raise HTTPException(400, f"Unknown effort {value}")
+            clean[key] = value
+        elif key == "engine":
+            if value not in ("claude_code", "api"):
+                raise HTTPException(400, "engine must be 'claude_code' or 'api'")
             clean[key] = value
         elif key in ("use_fallback", "chat_web_search", "allow_commands"):
             clean[key] = bool(value)
