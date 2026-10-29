@@ -150,6 +150,8 @@ export function chipInput({ values = [], suggestions, placeholder = '', strict =
   // Text typed but not yet added counts as a value when the form is saved.
   el.getValues = () => { if (input.value.trim() && !strict) add(input.value); return [...list]; };
   el.setValues = v => { list = [...v]; changed(); };
+  el.peekValues = () => [...list];  // without committing typed text
+  el.addValue = add;
   el.input = input;
   renderChips();
   return el;
@@ -161,7 +163,7 @@ const chipField = (label, input, hint) => h('div', { class: 'field' }, label, in
 
 // ================================================================ template references
 
-const templateItems = templates => templates.map(t => ({ value: t.symbol, label: t.name, hint: t.description || t.role }));
+const templateItems = templates => templates.map(t => ({ value: t.symbol, label: t.name, hint: [t.category, t.description || t.role].filter(Boolean).join(' — ') }));
 
 /** One-line summary of what a template contains. */
 export function templateSummary(t) {
@@ -188,7 +190,7 @@ export function agentTemplateFields(templates, { template = '', subagents = [], 
         : h('span', { style: { color: 'var(--err)' } }, `⚠ No template ${sym.startsWith('@') ? sym : '@' + sym}`));
   };
   autocomplete(input, {
-    source: q => rankMatches(templateItems(templates), q, 10),
+    source: q => rankMatches(templateItems(templates), q, 12),
     onPick: it => { input.value = it.value; showInfo(); onTemplate?.(find(it.value)); },
   });
   input.addEventListener('input', showInfo);
@@ -208,63 +210,161 @@ export function agentTemplateFields(templates, { template = '', subagents = [], 
 
 // ================================================================ template editor
 
-function templateModal(template, { templates, vocab, onSaved, copy = false }) {
-  const t = template || { name: '', slug: '', description: '', role: '', instructions: '', rules: [], expertise: [], skills: [], subagents: [], model: '', effort: '' };
+/**
+ * The template editor. Every field offers candidates (a "Suggested" row and the autocomplete list) that
+ * the server ranks from the fields above it: a category narrows the names, a name the descriptions and
+ * roles, the chosen expertise the skills, and so on (POST /api/templates/suggest).
+ */
+function templateModal(template, { templates, onSaved, copy = false }) {
+  const t = template || { name: '', slug: '', category: '', description: '', role: '', instructions: '', rules: [], expertise: [], skills: [], subagents: [], model: '', effort: '' };
   const editing = template && !copy;
-  const name = h('input', { type: 'text', value: copy ? `${t.name} (copy)` : t.name, placeholder: 'e.g. Code reviewer' });
+  let sugg = {};
+
+  const category = h('input', { type: 'text', value: t.category || '', placeholder: 'Choose a category or type a new one' });
+  const name = h('input', { type: 'text', value: copy ? `${t.name} (copy)` : t.name, placeholder: 'e.g. Code Reviewer' });
   const slug = h('input', { type: 'text', class: 'mono', value: editing ? t.symbol : '', placeholder: '@code-reviewer' });
   const slugify = s => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
   const autoSlug = () => { if (!slug.dataset.touched) slug.value = name.value.trim() ? `@${slugify(name.value)}` : ''; };
   name.addEventListener('input', autoSlug);
   slug.addEventListener('input', () => { slug.dataset.touched = '1'; });
   if (!editing) autoSlug();
-  const desc = h('input', { type: 'text', value: t.description, placeholder: 'e.g. Reviews code changes for bugs, security issues and style' });
-  const role = h('input', { type: 'text', value: t.role, placeholder: 'e.g. Senior software engineer focused on code quality' });
-  const expertise = chipInput({ values: t.expertise, suggestions: () => vocab.expertise, separator: ',', placeholder: 'Type to search, Enter or comma to add…' });
-  const skills = chipInput({ values: t.skills, suggestions: () => vocab.skills, separator: ',', placeholder: 'Type to search, Enter or comma to add…' });
-  const rules = chipInput({ values: t.rules, suggestions: () => vocab.rules, block: true, placeholder: 'Type a rule or search suggestions, Enter to add…' });
-  const others = templates.filter(x => !editing || x.id !== t.id);
+  const desc = h('input', { type: 'text', value: t.description, placeholder: 'When to use this agent' });
+  const role = h('input', { type: 'text', value: t.role, placeholder: 'e.g. Senior engineer who reviews code for correctness' });
+  const changedList = () => { renderHints(); refresh(0); };
+  const chips = (key, opts) => chipInput({ values: t[key], suggestions: () => sugg[key] || [], onChange: changedList, ...opts });
+  const expertise = chips('expertise', { separator: ',', placeholder: 'Type to search, Enter or comma to add…' });
+  const skills = chips('skills', { separator: ',', placeholder: 'Type to search, Enter or comma to add…' });
+  const rules = chips('rules', { block: true, placeholder: 'Type a rule or search the suggestions, Enter to add…' });
   const subagents = chipInput({
-    values: t.subagents.map(s => `@${s}`), strict: true, placeholder: others.length ? 'Type @ to add an internal agent' : 'No other templates yet',
-    suggestions: () => templateItems(others),
+    values: t.subagents.map(s => `@${s}`), strict: true, onChange: changedList,
+    placeholder: templates.length ? 'Type @ to add an internal agent' : 'No other templates yet',
+    suggestions: () => sugg.subagents || [],
   });
-  const instructions = h('textarea', { rows: 4, value: t.instructions, placeholder: 'Any further guidance, in free text' });
+  const instructions = h('textarea', { rows: 4, value: t.instructions, placeholder: 'Working method, output format, anything else' });
   const model = h('select', {}, h('option', { value: '' }, 'Agent’s own model'), modelOptions(t.model));
   const effort = h('select', {}, h('option', { value: '' }, 'Agent’s own effort'), effortOptions(t.effort));
   if (!t.model) model.value = '';
   if (!t.effort) effort.value = '';
 
+  // ---- suggestions from the server, refreshed whenever a field changes
+  const draft = () => ({
+    slug: slug.value, category: category.value, name: name.value, description: desc.value, role: role.value,
+    expertise: expertise.peekValues(), skills: skills.peekValues(), rules: rules.peekValues(), subagents: subagents.peekValues(),
+  });
+  let timer = null;
+  let seq = 0;
+  const load = async () => {
+    clearTimeout(timer);
+    const mine = ++seq;
+    let res;
+    try { res = await api('POST', '/api/templates/suggest', draft(), { quiet: true }); } catch { return; }
+    if (mine !== seq) return;
+    sugg = res;
+    renderHints();
+  };
+  const refresh = (delay = 250) => { clearTimeout(timer); timer = setTimeout(load, delay); };
+
+  const setText = (input, value) => { input.value = value; input.dispatchEvent(new Event('input')); };
+  const pickName = it => {
+    if (!category.value.trim() && it.category) category.value = it.category;
+    setText(name, it.value);
+  };
+  // Text inputs: autocomplete over the candidates; any edit refreshes the fields below.
+  const textField = (input, key, onPick = it => setText(input, it.value)) => {
+    autocomplete(input, { source: q => rankMatches(sugg[key] || [], q, 12), onPick: it => { onPick(it); refresh(0); } });
+    input.addEventListener('input', () => { renderHints(); refresh(); });
+  };
+  textField(category, 'category');
+  textField(name, 'name', pickName);
+  textField(desc, 'description');
+  textField(role, 'role');
+  instructions.addEventListener('input', () => renderHints());
+
+  // "Suggested" rows: the top candidates, one click to use. Text fields show them while empty.
+  const rows = {};
+  const row = key => (rows[key] = h('div', { class: 'sugg-row', 'data-key': key }));
+  const has = (chip, v) => chip.peekValues().some(x => x.toLowerCase() === v.toLowerCase());
+  const pills = (key, items, onPick, block = false) => fill(rows[key], items.length ? [
+    h('span', { class: 'lbl' }, 'Suggested'),
+    items.map(it => h('button', {
+      type: 'button', class: `pill${block ? ' block' : ''}`, title: it.hint ? `${it.value}\n— ${it.hint}` : it.value, onclick: () => onPick(it),
+    }, it.icon ? `${it.icon} ` : '', it.value, it.label ? h('span', { class: 'muted' }, ` ${it.label}`) : null)),
+  ] : null);
+  const renderHints = () => {
+    const list = key => sugg[key] || [];
+    pills('category', category.value.trim() ? [] : list('category'), it => { setText(category, it.value); refresh(0); });
+    pills('name', name.value.trim() ? [] : list('name').slice(0, 8), it => { pickName(it); refresh(0); });
+    pills('description', desc.value.trim() ? [] : list('description').slice(0, 2), it => { setText(desc, it.value); refresh(0); }, true);
+    pills('role', role.value.trim() ? [] : list('role').slice(0, 3), it => { setText(role, it.value); refresh(0); }, true);
+    const chipHints = (key, chip, max, block) => pills(key, list(key).filter(it => !has(chip, it.value)).slice(0, max), it => chip.addValue(it.value), block);
+    chipHints('expertise', expertise, 10);
+    chipHints('skills', skills, 10);
+    chipHints('rules', rules, 5, true);
+    chipHints('subagents', subagents, 6);
+    pills('instructions', list('instructions').filter(it => !instructions.value.includes(it.value)).slice(0, 3), it => {
+      instructions.value = instructions.value.trim() ? `${instructions.value.trim()}\n\n${it.value}` : it.value;
+      renderHints();
+    }, true);
+  };
+
+  // Fill every empty field from the template that best matches what is filled in.
+  const fillEmpty = async () => {
+    await load();
+    const b = sugg.best;
+    if (!b) { toast('Choose a category and a name (or role) first; the suggestions build on them.', 'info'); return; }
+    if (!category.value.trim()) category.value = b.category;
+    if (!name.value.trim()) setText(name, b.name);
+    if (!desc.value.trim()) desc.value = b.description;
+    if (!role.value.trim()) role.value = b.role;
+    for (const [chip, key] of [[expertise, 'expertise'], [skills, 'skills'], [rules, 'rules'], [subagents, 'subagents']]) {
+      if (!chip.peekValues().length) chip.setValues(b[key]);
+    }
+    if (!instructions.value.trim()) instructions.value = b.instructions;
+    if (!model.value && b.model) model.value = b.model;
+    if (!effort.value && b.effort) effort.value = b.effort;
+    toast(`Filled the empty fields from ${b.name}`, 'ok');
+    await load();
+  };
+
+  const withHints = (wrapper, key) => { wrapper.append(row(key)); return wrapper; };
   modal({
     title: editing ? `Edit template ${t.symbol}` : 'New agent template',
     wide: true,
     body: h('div', { class: 'form-grid' },
-      h('div', { class: 'form-grid two' }, field('Name', name),
+      h('div', { class: 'small muted', style: { marginTop: '-6px' } }, 'Each field suggests candidates based on the fields above it. Start with the category and name, or use “✨ Fill empty fields”.'),
+      withHints(field('Category', category), 'category'),
+      h('div', { class: 'form-grid two' },
+        withHints(field('Name', name), 'name'),
         field('Symbol', slug, 'How agents refer to this template, e.g. when you add it as an internal agent.')),
-      field('Description', desc, 'When to use it. Agents that have it as an internal agent read this to decide when to delegate.'),
-      field('Role', role),
-      chipField('Areas of expertise', expertise),
-      chipField('Skills', skills),
-      chipField('Rules', rules, 'Rules the agent must follow. Paste several lines to add one rule per line.'),
-      chipField('Internal agents', subagents, 'Templates an agent based on this one can delegate work to.'),
-      field('Additional instructions', instructions),
+      withHints(field('Description', desc, 'When to use it. Agents that have it as an internal agent read this to decide when to delegate.'), 'description'),
+      withHints(field('Role', role), 'role'),
+      withHints(chipField('Areas of expertise', expertise), 'expertise'),
+      withHints(chipField('Skills', skills), 'skills'),
+      withHints(chipField('Rules', rules, 'Rules the agent must follow. Paste several lines to add one rule per line.'), 'rules'),
+      withHints(chipField('Internal agents', subagents, 'Templates an agent based on this one can delegate work to.'), 'subagents'),
+      withHints(field('Additional instructions', instructions), 'instructions'),
       h('div', { class: 'form-grid two' }, field('Default model', model, 'Taken over when a project agent picks this template; used by internal agents.'), field('Default effort', effort))),
-    actions: [{
-      label: editing ? 'Save template' : 'Create template', kind: 'primary', onClick: async () => {
-        if (!name.value.trim()) { toast('A name is required.', 'error'); return false; }
-        const body = {
-          name: name.value, slug: slug.value.trim(), description: desc.value, role: role.value, instructions: instructions.value,
-          expertise: expertise.getValues(), skills: skills.getValues(), rules: rules.getValues(), subagents: subagents.getValues(),
-          model: model.value, effort: effort.value,
-        };
-        try {
-          const saved = editing ? await api('PUT', `/api/templates/${t.id}`, body) : await api('POST', '/api/templates', body);
-          toast(`Template ${saved.symbol} saved`, 'ok');
-          onSaved(saved);
-        } catch { return false; }
+    actions: [
+      { label: '✨ Fill empty fields', onClick: async () => { await fillEmpty(); return false; } },
+      {
+        label: editing ? 'Save template' : 'Create template', kind: 'primary', onClick: async () => {
+          if (!name.value.trim()) { toast('A name is required.', 'error'); return false; }
+          const body = {
+            name: name.value, slug: slug.value.trim(), category: category.value, description: desc.value, role: role.value, instructions: instructions.value,
+            expertise: expertise.getValues(), skills: skills.getValues(), rules: rules.getValues(), subagents: subagents.getValues(),
+            model: model.value, effort: effort.value,
+          };
+          try {
+            const saved = editing ? await api('PUT', `/api/templates/${t.id}`, body) : await api('POST', '/api/templates', body);
+            toast(`Template ${saved.symbol} saved`, 'ok');
+            onSaved(saved);
+          } catch { return false; }
+        },
       },
-    }],
+    ],
   });
-  setTimeout(() => name.focus(), 30);
+  load();
+  setTimeout(() => (editing ? name : category).focus(), 30);
 }
 
 // ================================================================ page
@@ -272,12 +372,20 @@ function templateModal(template, { templates, vocab, onSaved, copy = false }) {
 export async function templatesPage(view) {
   const page = h('div', { class: 'page' });
   view.append(page);
-  let [templates, vocab] = await Promise.all([api('GET', '/api/templates'), api('GET', '/api/templates/vocabulary')]);
-  const reload = async () => {
-    [templates, vocab] = await Promise.all([api('GET', '/api/templates', undefined, { quiet: true }), api('GET', '/api/templates/vocabulary', undefined, { quiet: true })]);
+  let templates = [];
+  let library = { categories: [], presets: [] };
+  let query = '';
+  let only = localStorage.getItem('tpl-category') || '';
+  const listEl = h('div');
+  const filterEl = h('div', { class: 'row wrap', style: { gap: '6px', marginBottom: '14px' } });
+  const restoreBtn = h('button', { onclick: () => installPresets() });
+
+  const load = async quiet => {
+    [templates, library] = await Promise.all([api('GET', '/api/templates', undefined, { quiet }), api('GET', '/api/templates/presets', undefined, { quiet })]);
     render();
   };
-  const edit = (t, copy = false) => templateModal(t, { templates, vocab, copy, onSaved: reload });
+  const reload = () => load(true);
+  const edit = (t, copy = false) => templateModal(t, { templates, copy, onSaved: reload });
   const remove = async t => {
     const uses = t.used_by.map(u => (u.project ? `• ${u.agent} in "${u.project}" (${u.as === 'template' ? 'based on it' : 'internal agent'})` : `• template ${u.symbol} (internal agent)`));
     const msg = `Delete the template ${t.symbol} "${t.name}"?` + (uses.length ? `\n\nIt is used by:\n${uses.join('\n')}\n\nThese references are removed.` : '');
@@ -286,8 +394,17 @@ export async function templatesPage(view) {
     toast('Template deleted', 'ok');
     reload();
   };
+  const missing = () => library.presets.filter(p => !p.installed);
+  const installPresets = async () => {
+    const names = missing().map(p => p.name);
+    if (!await confirmDialog(`Add ${names.length} starter template(s)?\n\n${names.join(', ')}`, { okLabel: 'Add', title: 'Starter templates' })) return;
+    const res = await api('POST', '/api/templates/presets/install', {});
+    toast(`${res.installed} starter template(s) added`, 'ok');
+    reload();
+  };
+
   const chipRow = (label, values) => (values.length
-    ? h('div', { class: 'tpl-row' }, h('span', { class: 'lbl' }, label), h('div', { class: 'chip-list' }, values.slice(0, 6).map(v => h('span', { class: 'chip sm', title: v }, h('span', { class: 'txt' }, v))), values.length > 6 ? h('span', { class: 'small muted' }, `+${values.length - 6}`) : null))
+    ? h('div', { class: 'tpl-row' }, h('span', { class: 'lbl' }, label), h('div', { class: 'chip-list' }, values.slice(0, 4).map(v => h('span', { class: 'chip sm', title: v }, h('span', { class: 'txt' }, v))), values.length > 4 ? h('span', { class: 'small muted' }, `+${values.length - 4}`) : null))
     : null);
   const card = t => h('div', { class: 'card tpl-card', onclick: () => edit(t) },
     h('div', { class: 'row' },
@@ -300,18 +417,55 @@ export async function templatesPage(view) {
     chipRow('Expertise', t.expertise),
     chipRow('Skills', t.skills),
     t.rules.length ? h('div', { class: 'small muted' }, `📏 ${t.rules.length} rule${t.rules.length === 1 ? '' : 's'}`) : null,
-    t.subagents.length ? h('div', { class: 'small' }, '🤝 Internal agents: ', t.subagents.map(s => h('code', { class: 'sym' }, `@${s}`))) : null,
+    t.subagents.length ? h('div', { class: 'small' }, '🤝 ', t.subagents.map(s => h('code', { class: 'sym' }, `@${s}`))) : null,
     h('div', { class: 'row small muted', style: { marginTop: 'auto' } },
       h('span', { class: 'grow' }, t.used_by.length ? `Used ${t.used_by.length}×` : 'Not used yet'),
       h('a', { href: `#/projects?new=1&template=${t.slug}`, onclick: e => e.stopPropagation() }, 'New project with it →')));
-  const render = () => fill(page,
-    h('div', { class: 'page-head' }, h('h1', {}, 'Agent templates'), h('div', { class: 'spacer' }),
+
+  // Categories in the library's order, then the user's own, then templates without one.
+  const groups = () => {
+    const known = library.categories.map(c => ({ ...c, items: [] }));
+    const byName = new Map(known.map(c => [c.name.toLowerCase(), c]));
+    for (const t of templates) {
+      const key = (t.category || '').toLowerCase();
+      if (!byName.has(key)) {
+        const g = { name: t.category || 'Uncategorized', icon: t.category ? '🏷' : '📁', items: [] };
+        byName.set(key, g);
+        known.push(g);
+      }
+      byName.get(key).items.push(t);
+    }
+    return known.filter(g => g.items.length);
+  };
+  const matches = t => !query || [t.name, t.symbol, t.description, t.role, ...t.expertise, ...t.skills].join(' ').toLowerCase().includes(query);
+  const render = () => {
+    const all = groups();
+    if (only && !all.some(g => g.name === only)) only = '';
+    restoreBtn.hidden = !missing().length;
+    fill(restoreBtn, `＋ Starter templates (${missing().length})`);
+    fill(filterEl, all.length > 1 ? [
+      h('button', { class: `sm${only ? '' : ' primary'}`, onclick: () => { only = ''; localStorage.removeItem('tpl-category'); render(); } }, `All (${templates.length})`),
+      all.map(g => h('button', { class: `sm${only === g.name ? ' primary' : ''}`, onclick: () => { only = g.name; localStorage.setItem('tpl-category', only); render(); } }, `${g.icon} ${g.name} (${g.items.length})`)),
+    ] : null);
+    const shown = all.filter(g => !only || g.name === only).map(g => ({ ...g, items: g.items.filter(matches) })).filter(g => g.items.length);
+    fill(listEl, !templates.length
+      ? h('div', { class: 'card empty' }, h('div', { class: 'big' }, '🧩'),
+        h('p', {}, 'No templates yet. Add the starter templates or create your own, then pick one when you set up a project agent.'),
+        h('div', { class: 'row', style: { justifyContent: 'center' } },
+          missing().length ? h('button', { class: 'primary', onclick: installPresets }, `Add ${missing().length} starter templates`) : null,
+          h('button', { onclick: () => edit(null) }, 'Create a template')))
+      : shown.length ? shown.map(g => h('section', { class: 'tpl-group' },
+        h('h3', {}, `${g.icon} ${g.name}`, h('span', { class: 'muted small' }, ` · ${g.items.length}`), g.about ? h('span', { class: 'muted small', style: { fontWeight: 400 } }, ` — ${g.about}`) : null),
+        h('div', { class: 'cards' }, g.items.map(card))))
+        : h('div', { class: 'card empty small' }, 'No templates match.'));
+  };
+
+  const search = h('input', { type: 'text', placeholder: 'Search templates…', style: { width: '220px' }, oninput: e => { query = e.target.value.trim().toLowerCase(); render(); } });
+  fill(page,
+    h('div', { class: 'page-head' }, h('h1', {}, 'Agent templates'), h('div', { class: 'spacer' }), search, restoreBtn,
       h('button', { class: 'primary', onclick: () => edit(null) }, '+ New template')),
     h('p', { class: 'muted', style: { marginTop: 0 } }, 'Reusable agent profiles: role, areas of expertise, skills and rules. Each template has a symbol such as ',
       h('code', {}, '@code-reviewer'), '. Use it to base a project agent on the template, or to give an agent internal agents it can delegate to.'),
-    templates.length ? h('div', { class: 'cards' }, templates.map(card))
-      : h('div', { class: 'card empty' }, h('div', { class: 'big' }, '🧩'),
-        h('p', {}, 'No templates yet. Create one, then pick it when you set up a project agent.'),
-        h('button', { class: 'primary', onclick: () => edit(null) }, 'Create your first template')));
-  render();
+    filterEl, listEl);
+  await load(false);
 }

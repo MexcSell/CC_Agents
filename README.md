@@ -4,7 +4,7 @@ A web workspace where Claude agents work for you:
 
 - **Chat**: create topics, hold conversations with Claude about them, keep or delete the history.
 - **Projects**: register a project with its repository folder. Each project gets its own agent. Assign tasks to the agent and it carries them out, keeping an estimate, progress, insights and next actions up to date.
-- **Templates**: reusable agent profiles (role, areas of expertise, skills, rules), each with a symbol such as `@code-reviewer`. Base a project agent on a template, or give an agent internal agents (sub-agents) it can delegate to. The editor autocompletes rules, expertise and skills.
+- **Templates**: reusable agent profiles (role, areas of expertise, skills, rules), each with a symbol such as `@code-reviewer`. Base a project agent on a template, or give an agent internal agents (sub-agents) it can delegate to. 35 starter templates in six categories are installed on first run. In the editor, every field suggests candidates that depend on the fields above it.
 - **Files**: browse the whole file system or a project's repository. Create, open, edit, rename, move (drag and drop) and delete files and folders.
 - **Developer**: an agent that develops and modifies this website's own code and restarts it. Code snapshots and automatic rollback keep a broken change from taking the site down.
 
@@ -69,6 +69,14 @@ pick it. Templates listed as the agent's *internal agents* (its own plus those o
 Code sub-agents that the agent can delegate to through the Agent tool. The API engine has no sub-agents and
 ignores them. Renaming a template's symbol updates every reference to it, and deleting a template removes them.
 
+The starter library (`app/template_presets.py`) covers planning and research, engineering, experience and art,
+quality and safety, delivery and operations, and data and analytics. It is installed once, the first time the
+server starts with a database. Deleted starter templates stay deleted; **＋ Starter templates** on the Templates
+page adds back any that are missing. In the template editor, the server ranks candidates for each field
+(`POST /api/templates/suggest`) from the fields above it, in the order category → name → description → role →
+expertise → skills → rules → internal agents → instructions. The ranking draws on the starter library and on your
+own templates. **✨ Fill empty fields** copies the best-matching profile into the fields that are still empty.
+
 On both engines, file writes are confined to the agent's workspace. On the Claude Code engine, Claude Code
 may still run read-only shell commands (such as `ls`) while shell commands are switched off.
 
@@ -120,7 +128,8 @@ app/server.py             FastAPI app: REST API, SSE event streams, static files
 app/runs.py               run manager and the API engine's streaming tool-use loop
 app/claude_code.py        the Claude Code engine (Claude Agent SDK)
 app/agents.py             system prompts and tool sets of the three agent types
-app/templates.py          agent templates (@symbols), autocomplete vocabulary, internal agents
+app/templates.py          agent templates (@symbols), context-dependent editor suggestions, internal agents
+app/template_presets.py   the built-in starter templates and categories
 app/tools.py              tool definitions and executors
 app/fsops.py              filesystem operations (file browser and file tools)
 app/maintenance.py        snapshots, preflight, restart, server log

@@ -608,6 +608,7 @@ def update_agent(pid: int, body: AgentIn):
 class TemplateIn(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     slug: str = ""                # the symbol, with or without "@"; derived from the name when empty
+    category: str = ""
     description: str = ""
     role: str = ""
     instructions: str = ""
@@ -636,9 +637,38 @@ def list_templates():
     return templates.list_all()
 
 
-@app.get("/api/templates/vocabulary")
-def template_vocabulary():
-    return templates.vocabulary()
+class TemplateDraft(BaseModel):
+    """A template being edited, as far as it is filled in."""
+    slug: str = ""
+    category: str = ""
+    name: str = ""
+    description: str = ""
+    role: str = ""
+    expertise: list[str] = []
+    skills: list[str] = []
+    rules: list[str] = []
+    subagents: list[str] = []
+
+
+@app.post("/api/templates/suggest")
+def suggest_template_values(body: TemplateDraft):
+    """Candidates for each field of the template editor, depending on the fields before it."""
+    return templates.suggest(body.model_dump())
+
+
+@app.get("/api/templates/presets")
+def template_presets():
+    """The starter template library: its categories and which of its templates are installed."""
+    return {"categories": templates.presets.CATEGORIES, "presets": templates.preset_status()}
+
+
+class PresetInstall(BaseModel):
+    slugs: list[str] | None = None   # None: every missing starter template
+
+
+@app.post("/api/templates/presets/install")
+def install_template_presets(body: PresetInstall):
+    return {"installed": templates.install_presets(body.slugs)}
 
 
 @app.post("/api/templates")
@@ -908,6 +938,7 @@ def main() -> None:
 
     maintenance.on_restart(stop)
     images.prune()
+    templates.seed_once()
     log.info("Agent Group listening on http://%s:%s (supervised=%s)", HOST, PORT, maintenance.under_supervisor())
     server.run()
     runs.cancel_all()

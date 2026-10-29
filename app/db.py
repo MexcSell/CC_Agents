@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS agent_templates (
     id INTEGER PRIMARY KEY,
     slug TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT '',
     description TEXT NOT NULL DEFAULT '',
     role TEXT NOT NULL DEFAULT '',
     instructions TEXT NOT NULL DEFAULT '',
@@ -118,6 +119,8 @@ with _lock:
         _conn.execute("ALTER TABLE agents ADD COLUMN template TEXT NOT NULL DEFAULT ''")
     if "subagents" not in agent_cols:  # JSON list of template slugs: the agent's internal agents
         _conn.execute("ALTER TABLE agents ADD COLUMN subagents TEXT NOT NULL DEFAULT '[]'")
+    if "category" not in {r["name"] for r in _conn.execute("PRAGMA table_info(agent_templates)")}:
+        _conn.execute("ALTER TABLE agent_templates ADD COLUMN category TEXT NOT NULL DEFAULT ''")
 
 
 def now() -> str:
@@ -172,6 +175,7 @@ DEFAULT_SETTINGS = {
     "chat_web_search": False,
     "allow_commands": True,
     "max_agent_turns": 80,
+    "templates_seeded": False,   # the starter agent templates were installed once
 }
 
 

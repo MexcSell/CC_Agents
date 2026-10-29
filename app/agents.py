@@ -76,7 +76,8 @@ exits with code 3, and restores the latest snapshot if a restarted server keeps 
 - app/server.py: FastAPI app. REST API under /api, Server-Sent Events for agent runs, serves static/ at /.
 - app/db.py: SQLite schema and helpers (database file in data/).
 - app/agents.py: system prompts and tool sets of the chat, developer and project agents.
-- app/templates.py: agent templates (referred to as @slug), autocomplete vocabulary, internal agents.
+- app/templates.py: agent templates (referred to as @slug), context-dependent editor suggestions, internal \
+agents; app/template_presets.py: the built-in starter templates.
 - app/runs.py: run manager and the streaming Claude tool-use loop for the API engine (Anthropic Python SDK).
 - app/claude_code.py: the Claude Code engine (Claude Agent SDK, uses the Claude Code login on this machine).
 - app/tools.py: tool definitions and executors (file tools, shell, task updates, restart).

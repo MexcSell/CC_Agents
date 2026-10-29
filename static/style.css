@@ -357,12 +357,22 @@ body.resizing { cursor: col-resize; user-select: none; }
 .chip.sm { padding: 1px 8px; font-size: 11.5px; }
 .tpl-row .chip-list { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
 .ac-menu { position: fixed; z-index: 70; max-width: min(560px, calc(100vw - 16px)); max-height: 280px; overflow: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow); padding: 4px; font-size: 13px; }
-.ac-item { display: flex; gap: 8px; align-items: baseline; padding: 6px 9px; border-radius: 6px; cursor: pointer; }
+.ac-item { display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: baseline; padding: 6px 9px; border-radius: 6px; cursor: pointer; }
 .ac-item.active { background: var(--accent-soft); }
 .ac-item .v { flex: none; max-width: 100%; }
 .ac-item .l { font-weight: 600; }
 .ac-item .hint { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .ac-foot { color: var(--muted); font-size: 11px; padding: 4px 9px 2px; border-top: 1px solid var(--border); margin-top: 4px; }
+.sugg-row { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; font-weight: 400; }
+.sugg-row:empty { display: none; }
+.sugg-row .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-right: 2px; }
+.pill { padding: 2px 9px; border-radius: 99px; font-size: 12px; font-weight: 400; border: 1px dashed var(--border); background: transparent; color: var(--text); max-width: 100%; }
+.pill::before { content: '+ '; color: var(--accent); font-weight: 600; }
+.pill:hover { border-color: var(--accent); background: var(--accent-soft); }
+.pill.block { border-radius: 6px; text-align: left; white-space: normal; flex: 1 1 100%; }
+.field .pill { font-size: 12px; }
+.tpl-group { margin-bottom: 22px; }
+.tpl-group > h3 { margin: 0 0 10px; }
 
 /* ---------- projects ---------- */
 .project-card { display: grid; gap: 10px; cursor: pointer; transition: border-color .15s; }
