@@ -1,13 +1,25 @@
 // Page renderers. Each page is `async (container, routeParams, query) => cleanup | undefined`.
 
 import {
-  api, h, fill, enc, go, field, state, toast, modal, banner, confirmDialog, promptDialog, contextMenu, md,
+  api, h, fill, enc, go, field, state, toast, modal, banner, confirmDialog, promptDialog, contextMenu, md, resizer,
   fmtDate, timeAgo, fmtDuration, fmtHours, statusBadge, progressBar, STATUS_LABELS, modelOptions, effortOptions,
 } from './core.js';
 import { ConversationView } from './conversation.js';
 import { FileExplorer, pickDirectory } from './files.js';
 
 const runDot = () => h('span', { class: 'dot run', title: 'Agent working' });
+
+// Pane heading and list-item icon; the icons are what remains when a pane is collapsed.
+const paneTitle = (ico, text, attrs = {}) => h('h2', attrs, h('span', { class: 'pico', title: `${text} · click to expand` }, ico), h('span', { class: 'txt' }, text));
+const itemIcon = (title, active) => h('span', { class: 'li-ico', title }, ([...(title || '').trim()][0] || '?').toUpperCase(), active ? runDot() : null);
+const newBtn = (title, onclick) => h('button', { class: 'sm primary', title, onclick }, '+', h('span', { class: 'lbl' }, ' New'));
+// Explanatory note under a pane heading: one truncated line until clicked. Expanded notes (keyed by text)
+// stay open across list re-renders until the page reloads.
+const openNotes = new Set();
+const paneNote = text => h('details', {
+  class: 'small muted pane-note', open: openNotes.has(text),
+  ontoggle: e => e.target.open ? openNotes.add(text) : openNotes.delete(text),
+}, h('summary', { title: 'Show / hide' }, text));
 
 // ================================================================ dashboard
 
@@ -91,14 +103,18 @@ export async function chatPage(view, [topicParam, convParam]) {
   const topicsPane = h('div', { class: 'pane' });
   const convsPane = h('div', { class: 'pane' });
   const mainPane = h('div', { class: 'pane main' });
-  view.append(h('div', { class: 'split chat' }, topicsPane, convsPane, mainPane));
+  view.append(h('div', { class: 'split chat' },
+    topicsPane, resizer(topicsPane, { key: 'chat-topics', width: 240, flex: mainPane }),
+    convsPane, resizer(convsPane, { key: 'chat-convs', width: 270, flex: mainPane }),
+    mainPane));
 
   const editTopic = t => topicModal(t, saved => go(`#/chat/${saved.id}`));
 
   const renderTopics = () => fill(topicsPane,
-    h('div', { class: 'pane-head' }, h('h2', {}, 'Topics'), h('button', { class: 'sm primary', onclick: () => editTopic(null) }, '+ New')),
+    h('div', { class: 'pane-head' }, paneTitle('🏷', 'Topics'), newBtn('New topic', () => editTopic(null))),
     h('div', { class: 'pane-body' }, topics.length
       ? topics.map(t => h('div', { class: `list-item${t.id === topicId ? ' active' : ''}`, onclick: () => go(`#/chat/${t.id}`) },
+        itemIcon(t.title),
         h('div', { class: 'grow' }, h('div', { class: 'title ellipsis' }, t.title),
           h('div', { class: 'small muted ellipsis' }, `${t.conversation_count} conversation${t.conversation_count === 1 ? '' : 's'}${t.last_activity ? ' · ' + timeAgo(t.last_activity) : ''}`)),
         h('div', { class: 'actions' }, h('button', { class: 'ghost icon sm', title: 'Edit topic', onclick: e => { e.stopPropagation(); editTopic(t); } }, '✎'))))
@@ -152,16 +168,17 @@ export async function chatPage(view, [topicParam, convParam]) {
 
   const renderConvs = () => {
     if (!topic) {
-      fill(convsPane, h('div', { class: 'pane-head' }, h('h2', {}, 'Conversations')), h('div', { class: 'empty small' }, 'Select or create a topic.'));
+      fill(convsPane, h('div', { class: 'pane-head' }, paneTitle('💬', 'Conversations')), h('div', { class: 'empty small' }, 'Select or create a topic.'));
       return;
     }
     fill(convsPane,
-      h('div', { class: 'pane-head' }, h('h2', { class: 'ellipsis', title: topic.title }, topic.title),
-        h('button', { class: 'sm primary', title: 'New conversation', onclick: () => go(`#/chat/${topic.id}`) }, '+ New'),
+      h('div', { class: 'pane-head' }, paneTitle('💬', topic.title, { class: 'ellipsis', title: topic.title }),
+        newBtn('New conversation', () => go(`#/chat/${topic.id}`)),
         h('button', { class: 'sm ghost icon', title: 'Topic actions', onclick: topicMenu }, '⋯')),
-      topic.description ? h('div', { class: 'small muted', style: { padding: '8px 12px', borderBottom: '1px solid var(--border)' } }, topic.description) : null,
+      topic.description ? paneNote(topic.description) : null,
       h('div', { class: 'pane-body' }, convs.length
         ? convs.map(c => h('div', { class: `list-item${c.id === convId ? ' active' : ''}`, onclick: () => go(`#/chat/${topic.id}/${c.id}`) },
+          itemIcon(c.title, c.active),
           h('div', { class: 'grow' }, h('div', { class: 'title ellipsis' }, c.active ? runDot() : null, c.title),
             h('div', { class: 'small muted' }, `${timeAgo(c.updated_at)} · ${c.message_count} messages`)),
           h('div', { class: 'actions' },
@@ -215,7 +232,10 @@ export async function devPage(view, [convParam]) {
   const listPane = h('div', { class: 'pane' });
   const mainPane = h('div', { class: 'pane main' });
   const sidePane = h('div', { class: 'pane side' });
-  view.append(h('div', { class: 'split dev' }, listPane, mainPane, sidePane));
+  view.append(h('div', { class: 'split dev' },
+    listPane, resizer(listPane, { key: 'dev-sessions', width: 250, flex: mainPane }),
+    mainPane,
+    resizer(sidePane, { key: 'dev-server', width: 360, min: 260, max: 640, collapseAt: 200, side: 'left', flex: mainPane }), sidePane));
 
   const refresh = async () => {
     sessions = await api('GET', '/api/conversations?kind=dev', undefined, { quiet: true });
@@ -223,28 +243,40 @@ export async function devPage(view, [convParam]) {
     const current = sessions.find(s => s.id === convId);
     if (current) cv.setTitle(current.title);
   };
+  const renameSession = async s => {
+    if (!s) return;
+    const title = await promptDialog('Rename session', { value: s.title, okLabel: 'Rename' });
+    if (!title) return;
+    await api('PATCH', `/api/conversations/${s.id}`, { title });
+    refresh();
+  };
   const renderList = () => fill(listPane,
-    h('div', { class: 'pane-head' }, h('h2', {}, 'Developer sessions'), h('button', { class: 'sm primary', onclick: () => go('#/dev') }, '+ New')),
-    h('div', { class: 'small muted', style: { padding: '10px 12px', borderBottom: '1px solid var(--border)' } },
-      'The Developer agent reads and edits this website’s source code and restarts the server when needed.'),
+    h('div', { class: 'pane-head' }, paneTitle('🛠', 'Developer sessions'), newBtn('New session', () => go('#/dev'))),
+    paneNote('The Developer agent reads and edits this website’s source code and restarts the server when needed.'),
     h('div', { class: 'pane-body' }, sessions.length
       ? sessions.map(s => h('div', { class: `list-item${s.id === convId ? ' active' : ''}`, onclick: () => go(`#/dev/${s.id}`) },
+        itemIcon(s.title, s.active),
         h('div', { class: 'grow' }, h('div', { class: 'title ellipsis' }, s.active ? runDot() : null, s.title), h('div', { class: 'small muted' }, timeAgo(s.updated_at))),
-        h('div', { class: 'actions' }, h('button', {
-          class: 'ghost icon sm', title: 'Delete session', onclick: async e => {
-            e.stopPropagation();
-            if (!await confirmDialog(`Delete the session "${s.title}"?`, { okLabel: 'Delete', danger: true })) return;
-            await api('DELETE', `/api/conversations/${s.id}`);
-            if (s.id === convId) go('#/dev'); else refresh();
-          },
-        }, '🗑'))))
+        h('div', { class: 'actions' },
+          h('button', { class: 'ghost icon sm', title: 'Rename session', onclick: e => { e.stopPropagation(); renameSession(s); } }, '✎'),
+          h('button', {
+            class: 'ghost icon sm', title: 'Delete session', onclick: async e => {
+              e.stopPropagation();
+              if (!await confirmDialog(`Delete the session "${s.title}"?`, { okLabel: 'Delete', danger: true })) return;
+              await api('DELETE', `/api/conversations/${s.id}`);
+              if (s.id === convId) go('#/dev'); else refresh();
+            },
+          }, '🗑'))))
       : h('div', { class: 'empty small' }, 'No sessions yet.')));
   renderList();
 
+  const renameBtn = h('button', { class: 'sm ghost', title: 'Rename', onclick: () => renameSession(sessions.find(s => s.id === convId)) }, '✎');
+  renameBtn.hidden = !convId;
   const cv = new ConversationView(mainPane, {
     convId,
     agentName: 'Developer agent',
     title: convId ? '' : 'New developer session',
+    headerActions: [renameBtn],
     placeholder: 'Describe a change to this website… (Enter to send)',
     emptyText: 'Ask for a change to this website, e.g. "Add a light/dark theme switch to the sidebar" or "Show each project\'s total estimated hours on the dashboard".',
     sendFn: convId ? null : async text => {
@@ -253,6 +285,7 @@ export async function devPage(view, [convParam]) {
       convId = c.id;
       cv.opts.sendFn = null;
       history.replaceState(null, '', `#/dev/${c.id}`);
+      renameBtn.hidden = false;
       const res = await api('POST', `/api/conversations/${c.id}/messages`, { text });
       return { ...res, conversation_id: c.id };
     },
@@ -293,7 +326,7 @@ async function renderServerPanel(pane) {
     renderServerPanel(pane);
   };
   fill(pane,
-    h('div', { class: 'pane-head' }, h('h2', {}, 'Server')),
+    h('div', { class: 'pane-head' }, paneTitle('🖥', 'Server')),
     h('div', { class: 'pane-body' },
       h('div', { class: 'side-section' },
         h('dl', { class: 'kv' },
@@ -330,10 +363,10 @@ function showServerLog() {
 
 async function registerProjectModal() {
   const settings = await api('GET', '/api/settings');
-  const home = state.info?.home || '/root';
+  const home = '/home';
   const name = h('input', { type: 'text', placeholder: 'e.g. Website redesign' });
   const desc = h('textarea', { rows: 3, placeholder: 'Goal and context of the project' });
-  const repo = h('input', { type: 'text', class: 'mono', placeholder: `${home}/projects/my-project` });
+  const repo = h('input', { type: 'text', class: 'mono', placeholder: '/home/me/my-project' });
   const create = h('input', { type: 'checkbox' });
   const browse = h('button', {
     onclick: async e => {
@@ -600,6 +633,7 @@ class TaskDetail {
     this.cv = new ConversationView(this.convHost, {
       convId: this.task.conversation_id,
       noHead: true,
+      copyParagraphs: true,
       agentName: agent.name,
       allowEmptySend: true,
       sendLabel: started ? 'Send' : '▶ Run agent',

@@ -1,6 +1,6 @@
 // Entry point: hash router, server health polling and restart handling.
 
-import { api, h, fill, state, banner } from './core.js';
+import { api, h, fill, state, banner, resizer } from './core.js';
 import * as pages from './pages.js';
 
 const routes = [
@@ -51,6 +51,7 @@ async function route() {
 }
 
 function setServerStatus(ok) {
+  document.getElementById('server-status').title = ok ? 'Server online' : 'Server offline';
   fill(document.getElementById('server-status'), h('span', { class: `dot ${ok ? 'ok' : 'err'}` }), ok ? 'server online' : 'server offline');
 }
 
@@ -98,6 +99,8 @@ async function init() {
     state.info = await api('GET', '/api/system/info', undefined, { quiet: true });
     state.pid = state.info.pid;
   } catch { /* the poller reports it */ }
+  const sidebar = document.getElementById('sidebar');
+  sidebar.after(resizer(sidebar, { key: 'sidebar', width: 208, min: 160, max: 360, collapseAt: 130, collapsed: 60, flex: document.getElementById('view') }));
   window.addEventListener('hashchange', route);
   window.addEventListener('beforeunload', e => {
     if (state.dirty.size) { e.preventDefault(); e.returnValue = ''; }

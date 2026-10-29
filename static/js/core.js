@@ -103,6 +103,77 @@ export function fill(el, ...children) {
   return el;
 }
 
+/**
+ * Make a grid column resizable. Returns the gutter element: a zero-width grid item to place next
+ * to `target` (before it when side is 'left'). The width lives in the CSS variable --w on target and
+ * in localStorage. Dragging below `collapseAt` snaps the column to `collapsed` px and adds the class
+ * "collapsed" (icon-only view); double-click the gutter or click a `.pico` icon to expand it again.
+ * `flex` is the column that gives up the space; it keeps at least 360px.
+ */
+export function resizer(target, { key, width, min = 180, max = 520, collapseAt = 130, collapsed = 56, side = 'right', flex }) {
+  const storeKey = `col-w:${key}`;
+  let last = width;  // last expanded width
+  const set = w => {
+    const shut = w < collapseAt;
+    if (!shut) last = w;
+    target.style.setProperty('--w', `${shut ? collapsed : w}px`);
+    target.classList.toggle('collapsed', shut);
+  };
+  const save = () => localStorage.setItem(storeKey, target.classList.contains('collapsed') ? `c${last}` : String(last));
+  const saved = localStorage.getItem(storeKey) || '';
+  const n = parseInt(saved.replace(/^c/, ''), 10);
+  if (n >= min && n <= max) last = n;
+  set(saved.startsWith('c') ? 0 : last);
+
+  const toggle = () => { set(target.classList.contains('collapsed') ? last : 0); save(); };
+  target.addEventListener('click', e => {
+    if (target.classList.contains('collapsed') && e.target.closest('.pico')) toggle();
+  });
+
+  const gutter = h('div', {
+    class: `gutter ${side}`, role: 'separator', tabindex: 0, 'aria-orientation': 'vertical',
+    title: 'Drag to resize · double-click to collapse or expand',
+    ondblclick: toggle,
+    onkeydown: e => {
+      const step = { ArrowLeft: -16, ArrowRight: 16 }[e.key];
+      if (e.key === 'Enter') toggle();
+      else if (step) {
+        const cur = target.classList.contains('collapsed') ? 0 : last;
+        set(Math.min(Math.max(cur + (side === 'left' ? -step : step), min), max));
+        save();
+      } else return;
+      e.preventDefault();
+    },
+  });
+  gutter.addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    gutter.setPointerCapture(e.pointerId);
+    const startX = e.clientX;
+    const startW = target.getBoundingClientRect().width;
+    const room = flex ? Math.max(0, flex.getBoundingClientRect().width - 360) : Infinity;
+    const limit = Math.max(min, Math.min(max, startW + room));
+    document.body.classList.add('resizing');
+    gutter.classList.add('active');
+    const move = ev => {
+      const raw = startW + (side === 'left' ? startX - ev.clientX : ev.clientX - startX);
+      set(raw < collapseAt ? 0 : Math.round(Math.min(Math.max(raw, min), limit)));
+    };
+    const end = () => {
+      gutter.removeEventListener('pointermove', move);
+      gutter.removeEventListener('pointerup', end);
+      gutter.removeEventListener('pointercancel', end);
+      document.body.classList.remove('resizing');
+      gutter.classList.remove('active');
+      save();
+    };
+    gutter.addEventListener('pointermove', move);
+    gutter.addEventListener('pointerup', end);
+    gutter.addEventListener('pointercancel', end);
+  });
+  return gutter;
+}
+
 export function toast(message, kind = 'info', ms = 4500) {
   const el = h('div', { class: `toast ${kind}` }, message);
   const host = document.getElementById('toasts');
@@ -344,6 +415,30 @@ export function enhanceMarkdown(el) {
         .then(() => { btn.textContent = 'Copied'; setTimeout(() => (btn.textContent = 'Copy'), 1200); });
     };
     pre.append(btn);
+  }
+  return el;
+}
+
+/** Adds a copy icon (shown on hover) to each paragraph-level block: paragraphs, headings, quotes, list items. */
+export function addParagraphCopy(el) {
+  const blocks = el.querySelectorAll(':scope > :is(p, h1, h2, h3, h4, h5, h6, blockquote), :scope > :is(ul, ol) > li');
+  for (const node of blocks) {
+    if (node.querySelector(':scope > .pcopy')) continue;
+    const btn = h('button', { class: 'pcopy', title: 'Copy paragraph', 'aria-label': 'Copy paragraph' });
+    btn.onclick = e => {
+      e.stopPropagation();
+      // Hide code-block "Copy" labels so they don't end up in the copied text.
+      const labels = [...node.querySelectorAll('pre .copy')];
+      labels.forEach(b => (b.hidden = true));
+      const text = node.innerText.trim();
+      labels.forEach(b => (b.hidden = false));
+      navigator.clipboard?.writeText(text).then(() => {
+        btn.classList.add('done');
+        setTimeout(() => btn.classList.remove('done'), 1200);
+      });
+    };
+    node.classList.add('pcopy-host');
+    node.append(btn);
   }
   return el;
 }

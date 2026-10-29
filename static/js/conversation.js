@@ -1,6 +1,6 @@
 // Conversation view: renders stored messages and follows a live agent run over Server-Sent Events.
 
-import { api, h, fill, md, renderMarkdown, enhanceMarkdown, fmtBytes, fmtDate, state, banner } from './core.js';
+import { api, h, fill, md, renderMarkdown, enhanceMarkdown, addParagraphCopy, fmtBytes, fmtDate, state, banner } from './core.js';
 
 export function toolSummary(name, input) {
   input = input || {};
@@ -46,7 +46,8 @@ export class ConversationView {
   /**
    * opts: convId, title, emptyText, placeholder, sendLabel, hint, agentName,
    *       sendFn(text) -> {run, conversation_id?}, allowEmptySend, headerActions [nodes],
-   *       onTaskUpdate(task), onRunState(running), noHead
+   *       onTaskUpdate(task), onRunState(running), noHead,
+   *       copyParagraphs (copy icon on each paragraph of the agent's replies)
    */
   constructor(el, opts = {}) {
     this.el = el;
@@ -161,7 +162,8 @@ export class ConversationView {
   renderBlock(b, results) {
     switch (b.type) {
       case 'text':
-        return b.text?.trim() ? md(b.text) : null;
+        if (!b.text?.trim()) return null;
+        return this.opts.copyParagraphs ? addParagraphCopy(md(b.text)) : md(b.text);
       case 'thinking':
         return b.thinking?.trim() ? this.thinkingEl(b.thinking, false) : null;
       case 'tool_use': {
@@ -405,6 +407,7 @@ export class ConversationView {
       b.el.classList.remove('cursor');
       b.el.innerHTML = renderMarkdown(b.buf);
       enhanceMarkdown(b.el);
+      if (this.opts.copyParagraphs) addParagraphCopy(b.el);
       if (!b.buf.trim()) b.el.remove();
     } else if (b.type === 'thinking') {
       b.el.querySelector('summary').textContent = 'Thinking';
