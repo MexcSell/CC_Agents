@@ -537,6 +537,10 @@ class ProjectPatch(BaseModel):
     create_repo: bool = False
 
 
+class ProjectRename(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
 class TeamIn(BaseModel):
     group: str
     model: str = ""
@@ -572,6 +576,12 @@ def _check_repo(path: str, create: bool) -> str:
 
 def _project_or_404(pid: int) -> dict:
     return db.get_project(pid) or not_found("Project not found")
+
+
+def _project_name(name: str) -> str:
+    if not name.strip():
+        raise HTTPException(400, "The project name cannot be empty")
+    return name.strip()
 
 
 def _agent_or_404(aid: int) -> dict:
@@ -665,10 +675,19 @@ def run_setup(pid: int, body: SetupIn):
 @app.put("/api/projects/{pid}")
 def update_project(pid: int, body: ProjectPatch):
     p = _project_or_404(pid)
+    name = _project_name(body.name)
     repo = str(APP_ROOT) if devteam.is_dev(p) else _check_repo(body.repo_path, body.create_repo)
     db.execute("UPDATE projects SET name = ?, description = ?, repo_path = ?, updated_at = ? WHERE id = ?",
-               (body.name.strip(), body.description, repo, db.now(), pid))
+               (name, body.description, repo, db.now(), pid))
     return _project_or_404(pid)
+
+
+@app.patch("/api/projects/{pid}")
+def rename_project(pid: int, body: ProjectRename):
+    """Rename only; unlike PUT it leaves the repository alone, so it works when the folder is missing."""
+    _project_or_404(pid)
+    db.execute("UPDATE projects SET name = ?, updated_at = ? WHERE id = ?", (_project_name(body.name), db.now(), pid))
+    return get_project(pid)
 
 
 def _save_agent(aid: int, body: AgentIn) -> None:

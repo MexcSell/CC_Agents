@@ -540,10 +540,10 @@ export async function projectsPage(view, params, query) {
         const { project } = await api('GET', '/api/devteam');   // the built-in Developer project, always there
         if (state.info) state.info.dev_project_id = project.id;
         shownPid = project.id;
-        res = await projectPage(host, [String(project.id), tab, taskParam], null, project);
+        res = await projectPage(host, [String(project.id), tab, taskParam], null, project, refresh);
       } else {
         shownPid = key;
-        res = await projectPage(host, [String(key), tab, taskParam]);
+        res = await projectPage(host, [String(key), tab, taskParam], null, null, refresh);
       }
       const nextContent = typeof res === 'function' ? { dispose: res } : { ...res };
       if (mine !== seq) { nextContent.dispose?.(); host.remove(); return; }
@@ -565,7 +565,8 @@ export async function projectsPage(view, params, query) {
   };
 }
 
-async function projectPage(view, [pidParam, tab = 'tasks', taskParam], query = null, loaded = null) {
+/** onChanged() is called after the project's name or team changes, e.g. to refresh the project list. */
+async function projectPage(view, [pidParam, tab = 'tasks', taskParam], query = null, loaded = null, onChanged = null) {
   const pid = +pidParam;
   if (tab === 'agent') tab = 'team';
   let project = loaded || await api('GET', `/api/projects/${pid}`);
@@ -577,10 +578,22 @@ async function projectPage(view, [pidParam, tab = 'tasks', taskParam], query = n
   view.append(page);
   const tabs = [['tasks', '✅ Tasks'], ['team', '👥 Team & settings'], ['knowledge', '🧠 Knowledge'],
     ...(dev ? [['server', '🖥 Server & snapshots'], ['files', '🗂 Source files']] : [['files', '🗂 Repository files']])];
+  let team = null;   // the Team & settings tab, when it is open
+  const changed = () => onChanged?.().catch(() => {});
+  const rename = async () => {
+    const name = await promptDialog('Rename project', { value: project.name, okLabel: 'Rename' });
+    if (!name || name.trim() === project.name) return;
+    Object.assign(project, await api('PATCH', `/api/projects/${pid}`, { name }));
+    renderHeader();
+    team?.setName(project.name);
+    toast('Project renamed', 'ok');
+    changed();
+  };
   const renderHeader = () => fill(header,
     dev ? devSwitch('team') : null,
     h('div', { class: 'page-head', style: { marginBottom: '8px' } },
       h('h1', {}, dev ? 'Development team' : project.name),
+      dev ? null : h('button', { class: 'sm ghost', title: 'Rename project', onclick: rename }, '✎'),
       h('span', { class: 'badge accent', title: `Lead · ${project.agent.model} · effort ${project.agent.effort}` }, `👑 ${project.agent.name}`),
       h('a', { class: 'badge', href: `${base}/team`, title: project.agents.map(a => `${'  '.repeat(a.depth)}${a.name}`).join('\n') }, `👥 ${project.agents.length} agent${project.agents.length === 1 ? '' : 's'}`),
       project.setup?.running ? h('a', { class: 'badge accent', href: `${base}/tasks`, title: 'The setup agent is analysing the project, staffing its team and planning its tasks' }, runDot(), 'Setting up') : null,
@@ -613,7 +626,7 @@ async function projectPage(view, [pidParam, tab = 'tasks', taskParam], query = n
     return () => fx.dispose();
   }
   if (tab === 'team') {
-    await teamTab(body, project, p => { project = { ...project, ...p }; renderHeader(); });
+    team = await teamTab(body, project, p => { project = { ...project, ...p }; renderHeader(); changed(); });
     return;
   }
   if (tab === 'knowledge') {

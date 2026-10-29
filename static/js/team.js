@@ -115,6 +115,7 @@ export function groupTree(members) {
 
 // ================================================================ team & settings tab
 
+/** Returns { setName(name) } to show a name changed elsewhere. */
 export async function teamTab(el, project, onSaved) {
   const [templates, groups] = await Promise.all([api('GET', '/api/templates'), api('GET', '/api/groups')]);
   const treeHost = h('div');
@@ -184,6 +185,8 @@ export async function teamTab(el, project, onSaved) {
           class: 'danger', onclick: async () => { if (await deleteProject(project)) go('#/projects'); },
         }, icon('trash'), 'Delete project'))))));
   renderTree();
+  // A rename from the page header updates the Name field, so that "Save project" keeps the new name.
+  return { setName: n => { name.value = n; project = { ...project, name: n }; } };
 }
 
 /** Ask for confirmation, then delete the project (stopping its running agents). Returns true when deleted.
