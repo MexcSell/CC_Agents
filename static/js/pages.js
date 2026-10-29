@@ -650,7 +650,7 @@ async function tasksTab(el, project, taskId, reloadProject) {
   }, h('option', { value: 'all' }, 'All tasks'), Object.entries(STATUS_LABELS).map(([k, v]) => h('option', { value: k, selected: k === filter }, v)));
   el.append(h('div', { class: 'tasks-layout' },
     h('div', { class: 'stack' },
-      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: () => newTaskModal(project, t => go(`${projectBase(project.id)}/tasks/${t.id}`)) }, '+ New task'),
+      h('div', { class: 'row tasks-toolbar' }, h('button', { class: 'primary', onclick: () => newTaskModal(project, t => go(`${projectBase(project.id)}/tasks/${t.id}`)) }, '+ New task'),
         project.system === 'dev' ? null : h('button', { title: 'Project setup: the analysis, the team and the task plan', onclick: () => go(`${projectBase(project.id)}/tasks`) }, '🧭 Setup'),
         h('div', { class: 'grow' }), filterSel),
       listEl),
@@ -881,7 +881,7 @@ class TaskDetail {
     const pid = this.project.id;
     fill(this.info,
       t.parent ? h('div', { class: 'small' }, '↑ Sub-task of ', h('a', { href: `${projectBase(pid)}/tasks/${t.parent.id}` }, `#${t.parent.id} ${t.parent.title}`)) : null,
-      h('h2', { style: { margin: 0 } }, `#${t.id} · ${t.title}`),
+      h('h2', { class: 'task-detail-title' }, `#${t.id} · ${t.title}`),
       h('div', { class: 'row wrap' },
         t.running ? h('span', { class: 'badge accent' }, runDot(), 'agent working') : null,
         t.team_running ? h('span', { class: 'badge accent' }, runDot(), `${t.team_running} teammate${t.team_running === 1 ? '' : 's'} working`) : null,
