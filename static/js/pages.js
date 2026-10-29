@@ -588,7 +588,7 @@ async function projectPage(view, [pidParam, tab = 'tasks', taskParam], query = n
       h('a', { class: 'mono small', href: `${base}/files`, title: 'Open the repository' }, `📁 ${project.repo_path}`),
       dev ? null : h('button', { class: 'ghost sm del', title: 'Delete this project', onclick: async () => { if (await deleteProject(project)) go('#/projects'); } }, icon('trash'), 'Delete')),
     project.repo_exists ? null : h('div', { class: 'notice warn', style: { marginBottom: '10px' } }, `The repository folder ${project.repo_path} does not exist. Fix it under "Team & settings".`),
-    project.description ? h('div', { class: 'muted', style: { marginBottom: '10px' } }, project.description) : null,
+    project.description ? h('div', { style: { marginBottom: '10px' } }, paneNote(project.description, 'inline')) : null,
     h('div', { class: 'tabs' }, tabs.map(([key, label]) =>
       h('button', { class: tab === key ? 'active' : '', onclick: () => go(`${base}/${key}`) }, label))));
   renderHeader();
