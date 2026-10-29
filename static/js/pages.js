@@ -658,13 +658,22 @@ async function tasksTab(el, project, taskId, reloadProject) {
 
   let rootId = null;  // the top-level task of the task on screen (a sub-task's tree stays highlighted)
   const item = t => h('div', { class: `card task-item${t.id === taskId || t.id === rootId ? ' active' : ''}`, onclick: () => go(`${projectBase(project.id)}/tasks/${t.id}`) },
-    h('div', { class: 'row' }, h('b', { class: 'grow ellipsis' }, t.title), t.open_questions ? h('span', { class: 'badge review', title: 'Questions for you' }, `❓ ${t.open_questions}`) : null, t.running || t.team_running ? runDot() : null),
+    h('div', { class: 'row' }, h('b', { class: 'grow ellipsis' }, t.title), t.open_questions ? h('span', { class: 'badge review', title: 'Questions for you' }, `❓ ${t.open_questions}`) : null, t.running || t.team_running ? runDot() : null,
+      h('button', { class: 'ghost icon sm danger', title: 'Delete task', onclick: e => { e.stopPropagation(); removeTask(t); } }, '🗑')),
     h('div', { class: 'row small muted' }, statusBadge(t.status), h('span', {}, `#${t.id}`), h('span', {}, `est. ${fmtHours(t.estimated_hours)}`), h('span', { class: 'grow', style: { textAlign: 'right' } }, `${t.progress}%`)),
     progressBar(t.progress, t.status === 'done'),
     h('div', { class: 'row small muted' },
       t.assignee ? h('span', { class: 'ellipsis' }, `🤖 ${t.assignee.name}`) : null,
       t.subtask_count ? h('span', {}, `🗂 ${t.subtasks_done}/${t.subtask_count} sub-tasks`) : null,
       t.team_running ? h('span', {}, `👥 ${t.team_running} working`) : null));
+  const removeTask = async t => {
+    const subs = t.subtask_count ? ` with its ${t.subtask_count} sub-task${t.subtask_count === 1 ? '' : 's'}` : '';
+    if (!await confirmDialog(`Delete task #${t.id} "${t.title}"${subs} and its agent log?`, { okLabel: 'Delete', danger: true })) return;
+    await api('DELETE', `/api/tasks/${t.id}`);
+    toast('Task deleted', 'ok');
+    if (t.id === taskId || t.id === rootId) go(`${projectBase(project.id)}/tasks`);
+    else refreshList().catch(() => {});
+  };
   const renderList = () => {
     const shown = tasks.filter(t => filter === 'all' || t.status === filter);
     fill(listEl, ...(shown.length ? shown.map(item)
