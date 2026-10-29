@@ -232,6 +232,18 @@ SETUP_TOOLS = [
           ["tasks"]),
 ]
 
+# Leads staff their team for a task: find templates, create a missing one, add members below themselves.
+LEAD_TOOLS += [t for t in SETUP_TOOLS if t["name"] in ("list_templates", "create_template")] + [
+    _tool("add_team_member",
+          "Add an agent built from a template to your team, reporting to you, when the task needs a specialist your "
+          "team lacks. Find the template with list_templates first. You can then assign it sub-tasks with "
+          "create_subtasks or consult it with ask_agent.",
+          {"template": {"type": "string", "description": "The template's symbol, e.g. '@python-developer'."},
+           "name": {"type": "string", "description": "Display name. Default: the template's name."},
+           "key": {"type": "string", "description": "Short handle to address the member. Default: derived from the name."}},
+          ["template"]),
+]
+
 WEB_FETCH_TOOL = {"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 10}
 
 DEV_TOOLS = [

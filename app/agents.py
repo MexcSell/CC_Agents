@@ -84,7 +84,7 @@ exits with code 3, and restores the latest snapshot if a restarted server keeps 
 - app/templates.py: agent templates (referred to as @slug), context-dependent editor suggestions, internal \
 agents; app/template_presets.py: the built-in templates (by functional area and language) and agent groups.
 - app/groups.py: agent groups (#slug), hierarchical teams of templates that become a project's agents.
-- app/devteam.py: the Developer project, the development team of this website (built in, listed on the Projects page, opened on the Developer page, cannot be deleted).
+- app/devteam.py: the Developer project, the development team of this website (built in, listed on the Projects page, cannot be deleted).
 - app/team.py: team work on tasks: sub-tasks, delegation, consultations, questions to the user, lessons \
 learned, the team discussion.
 - app/runs.py: run manager and the streaming Claude tool-use loop for the API engine (Anthropic Python SDK).
@@ -113,7 +113,7 @@ Python files need restart_server.
 - restart_server runs a preflight check (byte-compile and import) and refuses if it fails. The restart \
 happens after your turn ends, so make it your last step and summarise your changes before calling it.
 - A snapshot of the source is saved automatically before your first file change in each run; the user \
-can restore snapshots from the Developer page.
+can restore snapshots from the Developer project's Server & snapshots tab.
 - File tools cannot modify {", ".join(d + "/" for d in DEV_PROTECTED_DIRS)}. Install Python packages \
 with run_command (`.venv/bin/pip install ...`) and add them to requirements.txt.
 - Use read_server_log to investigate errors.
@@ -156,10 +156,13 @@ def team_roster(project: dict, agent: dict) -> str:
     return "\n".join(lines)
 
 
-LEAD_METHOD = """You lead the team members below you in the team list. Each conversation is about one task \
-assigned to you, by the user or by your own lead. How to carry it out:
+LEAD_METHOD = """You lead the team members below you in the team list and can add members. Each conversation \
+is about one task assigned to you, by the user or by your own lead. How to carry it out:
 - Understand the task and look at the repository enough to plan. Call update_task with status \
 "in_progress", estimated_hours for the whole task and your plan as next_actions.
+- Analyse the task's instructions and decide which specialists it needs. If your team lacks one, find a \
+fitting template with list_templates and add it below you with add_team_member; create a template \
+(create_template) only when no template covers the role, and never duplicate one or a member.
 - Break the work into sub-tasks sized for one agent, with a clear description and acceptance criteria, and \
 assign each to the best-suited member below you with create_subtasks. Use the specialists: developers \
 build, QA tests, reviewers review, and so on. Small coordinating work you may do yourself.
@@ -209,7 +212,7 @@ Working on this website:
 - Changes under static/ take effect when the browser reloads. Changes to Python files take effect only \
 after a server restart.
 - A snapshot of the source is saved automatically before the team's first file change on a task; the user \
-can restore snapshots from the Developer page.
+can restore snapshots from the Developer project's Server & snapshots tab.
 - File tools cannot modify {", ".join(d + "/" for d in DEV_PROTECTED_DIRS)}. Install Python packages with \
 run_command (`.venv/bin/pip install ...`) and add them to requirements.txt.
 - read_server_log shows the server's output, including tracebacks. On Claude Code it is \
@@ -231,6 +234,11 @@ def project_brief(project: dict) -> str:
     return f"\n\nProject brief (analysis of the project and its repository):\n{brief}" if brief else ""
 
 
+def is_lead(project: dict, agent: dict) -> bool:
+    """Whether an agent leads: it has reports, or it is the project's top lead (who can add members)."""
+    return agent["depth"] == 0 or any(a["parent_id"] == agent["id"] for a in project["agents"])
+
+
 def task_system_prompt(project: dict, agent: dict) -> str:
     template, _ = templates.resolve_agent(agent)
     role_text = agent["role"].strip() or (template["role"] if template else "")
@@ -238,7 +246,7 @@ def task_system_prompt(project: dict, agent: dict) -> str:
     instructions = agent["instructions"].strip() or "(none)"
     profile = template_profile(agent)
     profile = f"\n\n{profile}" if profile else ""
-    leads = any(a["parent_id"] == agent["id"] for a in project["agents"])
+    leads = is_lead(project, agent)
     site = ""
     if devteam.is_dev(project):
         site = f"\n\n{DEV_TEAM_COMMON}\n{DEV_TEAM_LEAD if agent['depth'] == 0 else DEV_TEAM_MEMBER}"
@@ -271,7 +279,7 @@ def _subagents(agent: dict) -> dict:
 
 def task_spec(project: dict, agent: dict, task_id: int) -> AgentSpec:
     s = db.get_settings()
-    leads = any(a["parent_id"] == agent["id"] for a in project["agents"])
+    leads = is_lead(project, agent)
     tools = T.FILE_TOOLS + T.TASK_TOOLS + T.TEAM_TOOLS + (T.LEAD_TOOLS if leads else [])
     if devteam.is_dev(project):
         root_id = team.root_of(db.get_task(task_id))["id"]

@@ -461,18 +461,117 @@ function registerProjectModal() {
   setTimeout(() => name.focus(), 30);
 }
 
-export async function projectsPage(view, _params, query) {
+/** The project list on the left, the overview or the selected project on the right. Routes:
+ *  #/projects (overview), #/projects/:id[/tab[/task]] and #/dev/team[/tab[/task]] (params[0] is 'dev'). */
+export async function projectsPage(view, params, query) {
+  let projects = await api('GET', '/api/projects');
+  let key;              // what the main pane shows: a project id, 'dev' or null for the overview
+  let shownPid = null;  // id of the project on screen
+  let content = null;   // { dispose, update } of the main pane's content
+  const listPane = h('div', { class: 'pane' });
+  const mainPane = h('div', { class: 'pane main' });
+  view.append(h('div', { class: 'split projects' },
+    listPane, resizer(listPane, { key: 'projects-list', width: 260, flex: mainPane }),
+    mainPane));
+
+  const refresh = async () => {
+    projects = await api('GET', '/api/projects', undefined, { quiet: true });
+    renderList();
+  };
+  // Deleting the project on screen (or any from the overview) rebuilds the page; otherwise the list refreshes.
+  const remove = async p => {
+    if (!await deleteProject(p)) return;
+    if (key === null || p.id === shownPid) go('#/projects'); else refresh().catch(() => {});
+  };
+  const renderList = () => refill(listPane,
+    h('div', { class: 'pane-head' }, paneTitle('📋', 'Projects'),
+      newBtn('Register project', () => registerProjectModal())),
+    h('div', { class: 'pane-body' }, projects.length
+      ? projects.map(p => {
+        const dev = p.system === 'dev';
+        const busy = p.running || p.setup?.running;
+        return h('div', { class: `list-item${dev ? ' dev-project' : ''}${(dev ? key === 'dev' : p.id === key) ? ' active' : ''}`, onclick: () => go(dev ? '#/dev/team' : `#/projects/${p.id}`) },
+          dev ? h('span', { class: 'li-ico', title: p.name }, '🛠', busy ? runDot() : null) : itemIcon(p.name, busy),
+          h('div', { class: 'grow' },
+            h('div', { class: 'title ellipsis' }, busy ? runDot() : null, p.name,
+              p.open_questions ? h('span', { class: 'badge review', title: 'Questions for you' }, `❓ ${p.open_questions}`) : null),
+            h('div', { class: 'small muted ellipsis' }, `${p.stats.done}/${p.stats.total} tasks · ${p.agent_count} agent${p.agent_count === 1 ? '' : 's'}`)),
+          dev ? null : h('div', { class: 'actions' },
+            h('button', { class: 'ghost icon sm', title: 'Delete project', onclick: e => { e.stopPropagation(); remove(p); } }, '🗑')));
+      })
+      : h('div', { class: 'empty small' }, 'No projects yet. Register one to begin.')));
+
+  // Show the route's project (or the overview). Selecting a task of the project on screen updates it in place;
+  // anything else is built on top of the old content, which is swapped out when it has loaded.
+  let seq = 0;
+  let first = true;   // the list was just loaded
+  const show = async ([pidParam, tab, taskParam], q) => {
+    const mine = ++seq;
+    const next = pidParam === 'dev' ? 'dev' : pidParam ? +pidParam : null;
+    if (next === key && content?.update) {
+      try {
+        if (await content.update([String(shownPid), tab, taskParam]) !== false) { refresh().catch(() => {}); return; }
+      } catch (e) { console.error(e); }
+      if (mine !== seq) return;
+    }
+    content?.dispose?.();
+    content = null;
+    key = next;
+    renderList();
+    const listed = first ? null : refresh().catch(() => {});
+    first = false;
+    const old = [...mainPane.children];
+    const host = h('div', { class: old.length ? 'pane-swap loading' : 'pane-swap' });
+    mainPane.append(host);
+    const reveal = () => { old.forEach(n => n.remove()); host.classList.remove('loading'); mainPane.scrollTop = 0; };
+    const timer = setTimeout(() => mine === seq && reveal(), 400);
+    try {
+      let res;
+      if (key === null) {
+        shownPid = null;
+        await listed;
+        res = projectsOverview(host, projects, q, remove);
+      } else if (key === 'dev') {
+        const { project } = await api('GET', '/api/devteam');   // the built-in Developer project, always there
+        if (state.info) state.info.dev_project_id = project.id;
+        shownPid = project.id;
+        res = await projectPage(host, [String(project.id), tab, taskParam], null, project);
+      } else {
+        shownPid = key;
+        res = await projectPage(host, [String(key), tab, taskParam]);
+      }
+      const nextContent = typeof res === 'function' ? { dispose: res } : { ...res };
+      if (mine !== seq) { nextContent.dispose?.(); host.remove(); return; }
+      content = nextContent;
+    } catch (e) {
+      if (mine !== seq) { host.remove(); return; }
+      console.error(e);
+      fill(host, h('div', { class: 'page' }, h('div', { class: 'notice error' }, `Could not load this project: ${e.message}`)));
+    } finally {
+      clearTimeout(timer);
+      if (mine === seq) reveal();
+    }
+  };
+
+  await show(params, query);
+  return {
+    update: show,
+    dispose: () => { seq++; content?.dispose?.(); content = null; },
+  };
+}
+
+/** The projects overview: a card per project. */
+function projectsOverview(view, projects, query, remove) {
   const page = h('div', { class: 'page' });
   view.append(page);
-  const projects = await api('GET', '/api/projects');
-  // The built-in Developer project opens on the Developer page and cannot be deleted.
+  // The built-in Developer project opens under #/dev/team and cannot be deleted.
   const card = p => h('div', { class: 'card project-card', onclick: () => go(p.system === 'dev' ? '#/dev/team' : `#/projects/${p.id}`) },
     h('div', { class: 'row' }, h('h2', { class: 'grow ellipsis', style: { margin: 0 } }, p.system === 'dev' ? `🛠 ${p.name}` : p.name),
       p.setup?.running ? h('span', { class: 'badge accent' }, runDot(), 'setting up') : null,
       p.running ? h('span', { class: 'badge accent' }, runDot(), `${p.running} running`) : null,
       p.system === 'dev' ? h('span', { class: 'badge', title: 'The development team of this website. Built in, cannot be deleted.' }, 'built-in') : h('button', {
         class: 'ghost icon sm danger', title: 'Delete project',
-        onclick: async e => { e.stopPropagation(); if (await deleteProject(p)) go('#/projects'); },
+        onclick: e => { e.stopPropagation(); remove(p); },
       }, '🗑')),
     p.description ? h('div', { class: 'muted small', style: { display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' } }, p.description) : null,
     h('div', { class: 'path' }, '📁 ', p.repo_path, p.repo_exists ? '' : '  ⚠ missing'),
@@ -491,17 +590,17 @@ export async function projectsPage(view, _params, query) {
       : h('div', { class: 'card empty' }, h('div', { class: 'big' }, '📋'),
         h('p', {}, 'Register a project with its name, repository folder and details. A setup agent analyses it, puts together its agent team and plans its tasks.'),
         h('button', { class: 'primary', onclick: () => registerProjectModal() }, 'Register your first project')));
-  if (query.get('new')) {
+  if (query?.get('new')) {
     history.replaceState(null, '', '#/projects');
     registerProjectModal();
   }
 }
 
-export async function projectPage(view, [pidParam, tab = 'tasks', taskParam], query = null, loaded = null) {
+async function projectPage(view, [pidParam, tab = 'tasks', taskParam], query = null, loaded = null) {
   const pid = +pidParam;
   if (tab === 'agent') tab = 'team';
   let project = loaded || await api('GET', `/api/projects/${pid}`);
-  const dev = project.system === 'dev';   // the development team of this website, shown on the Developer page
+  const dev = project.system === 'dev';   // the development team of this website, shown under #/dev/team
   const base = projectBase(pid);
   const page = h('div', { class: 'page', style: { maxWidth: '1400px' } });
   const header = h('div');
@@ -510,7 +609,7 @@ export async function projectPage(view, [pidParam, tab = 'tasks', taskParam], qu
   const tabs = [['tasks', '✅ Tasks'], ['team', '👥 Team & settings'], ['knowledge', '🧠 Knowledge'],
     ...(dev ? [['server', '🖥 Server & snapshots'], ['files', '🗂 Source files']] : [['files', '🗂 Repository files']])];
   const renderHeader = () => fill(header,
-    dev ? devSwitch('team') : h('div', { class: 'small', style: { marginBottom: '6px' } }, h('a', { href: '#/projects' }, '← Projects')),
+    dev ? devSwitch('team') : null,
     h('div', { class: 'page-head', style: { marginBottom: '8px' } },
       h('h1', {}, dev ? 'Development team' : project.name),
       h('span', { class: 'badge accent', title: `Lead · ${project.agent.model} · effort ${project.agent.effort}` }, `👑 ${project.agent.name}`),
@@ -569,16 +668,8 @@ function devSwitch(active) {
       h('button', { class: active === key ? 'active' : '', onclick: () => go(href) }, label))));
 }
 
-export async function devTeamPage(view, [tab = 'tasks', taskParam]) {
-  const { project } = await api('GET', '/api/devteam');   // the built-in Developer project, always there
-  if (state.info) state.info.dev_project_id = project.id;
-  const res = await projectPage(view, [String(project.id), tab, taskParam], null, project);
-  const next = typeof res === 'function' ? { dispose: res } : { ...res };
-  return { ...next, update: next.update ? ([t = 'tasks', task]) => next.update([String(project.id), t, task]) : null };
-}
-
 function newTaskModal(project, onCreated) {
-  const title = h('input', { type: 'text', placeholder: 'e.g. Add a contact form to the landing page' });
+  const title = h('input', { type: 'text', placeholder: 'Optional — taken from the description if empty' });
   const desc = h('textarea', { rows: 5, placeholder: 'What should be done? Acceptance criteria, links, constraints…' });
   const est = h('input', { type: 'number', min: 0, step: 0.25, placeholder: 'Let the agent estimate' });
   const actions = h('textarea', { rows: 3, placeholder: 'Optional: initial action items, one per line' });
@@ -594,7 +685,7 @@ function newTaskModal(project, onCreated) {
       h('label', { class: 'check' }, start, 'Start working on it right away')),
     actions: [{
       label: 'Create task', kind: 'primary', onClick: async () => {
-        if (!title.value.trim()) { toast('A title is required.', 'error'); return false; }
+        if (!title.value.trim() && !desc.value.trim()) { toast('Enter a title or a description.', 'error'); return false; }
         try {
           const task = await api('POST', `/api/projects/${project.id}/tasks`, {
             title: title.value, description: desc.value,

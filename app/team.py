@@ -15,11 +15,12 @@ that run cancels the runs it is waiting for.
 
 import json
 import logging
+import re
 import threading
 import time
 from pathlib import Path
 
-from . import db, tools as T
+from . import db, groups, templates, tools as T
 
 log = logging.getLogger("agent_group.team")
 
@@ -76,6 +77,37 @@ def find_member(candidates: list[dict], ref: str) -> dict:
             return a
     names = ", ".join(f"{a['key']} ({a['name']})" for a in candidates) or "nobody"
     raise T.ToolError(f"No teammate '{ref}' here. You can address: {names}.")
+
+
+TITLE_CHARS = 80
+
+
+def title_from(description: str) -> str:
+    """A task title from its description: the first non-empty line without Markdown markers, at most
+    TITLE_CHARS characters (cut at a word boundary, with '…')."""
+    def clean(line: str) -> str:
+        if line.strip().startswith(("```", "~~~")):  # code fence
+            return ""
+        line = re.sub(r"^(?:(?:#+|>+|[-*+]|\d+[.)])(?:\s+|$))*", "", line.strip())
+        # emphasis and code markers; a single _ inside a word (snake_case) stays
+        return " ".join(re.sub(r"`|(?<!\w)[*_]+|[*_]+(?!\w)", "", line).split())
+    title = next(filter(None, map(clean, (description or "").splitlines())), "")
+    if len(title) > TITLE_CHARS:
+        cut = title[:TITLE_CHARS]
+        if title[TITLE_CHARS] != " " and " " in cut:
+            cut = cut.rsplit(" ", 1)[0]
+        title = cut.rstrip(" ,;:") + "…"
+    return title
+
+
+def unique_key(pid: int, name: str, exclude: int | None = None) -> str:
+    """A key for an agent of project `pid`, derived from `name` and not used by its other agents."""
+    taken = {r["key"] for r in db.query("SELECT key FROM agents WHERE project_id = ? AND id IS NOT ?", (pid, exclude))}
+    key = base = groups.slugify(name) or "agent"
+    n = 2
+    while key in taken:
+        key, n = f"{base}-{n}", n + 1
+    return key
 
 
 def task_conversation(tid: int) -> dict | None:
@@ -161,7 +193,7 @@ def create_subtasks(run, spec, args: dict) -> str:
     project, me, task = _context(spec)
     team = reports_of(project["agents"], me["id"])
     if not team:
-        raise T.ToolError("Nobody reports to you, so you cannot delegate. Do the work yourself.")
+        raise T.ToolError("Nobody reports to you yet. Add members with add_team_member, or do the work yourself.")
     created = []
     ts = db.now()
     for item in args["subtasks"]:
@@ -275,6 +307,45 @@ def review_subtask(run, spec, args: dict) -> str:
     run.emit("task_update", task=db.get_task(task["id"]))
     then = " Now delegate it again with your feedback as the message." if decision == "revise" else ""
     return f"#{sub['id']} is now {fields['status']}.{then}"
+
+
+def list_templates(run, spec, args: dict) -> str:
+    from . import project_setup
+    return project_setup.list_templates(run, spec, args)
+
+
+def create_template(run, spec, args: dict) -> str:
+    from . import project_setup
+    return project_setup.create_template(run, spec, args)
+
+
+def add_team_member(run, spec, args: dict) -> str:
+    project, me, task = _context(spec)
+    t = templates.by_slug(args["template"])
+    if not t:
+        raise T.ToolError(f"There is no template {args['template']}. Find one with list_templates, or create it with "
+                          "create_template if no template covers the role.")
+    same = next((a for a in project["agents"] if a["template"] == t["slug"]), None)
+    if same:
+        boss = next((a for a in project["agents"] if a["id"] == same["parent_id"]), None)
+        where = "reports to you" if boss is me else f"reports to {boss['name']} [{boss['key']}]" if boss else "is the lead"
+        raise T.ToolError(f"The team already has {same['name']} [{same['key']}] ({t['symbol']}), who {where}. Use that "
+                          "member: assign it work (through its lead if it is not below you) or consult it with ask_agent.")
+    name = (args.get("name") or "").strip() or t["name"]
+    s, ts = db.get_settings(), db.now()
+    with db.transaction():
+        key = unique_key(project["id"], (args.get("key") or "").strip() or name)
+        db._conn.execute(
+            "INSERT INTO agents(project_id, parent_id, key, sort, name, role, instructions, model, effort, template, "
+            "subagents, created_at, updated_at) SELECT ?, ?, ?, COALESCE(MAX(sort), -1) + 1, ?, ?, '', ?, ?, ?, '[]', "
+            "?, ? FROM agents WHERE project_id = ?",
+            (project["id"], me["id"], key, name, t["role"], t["model"] or s["project_model"],
+             t["effort"] or s["project_effort"], t["slug"], ts, ts, project["id"]))
+    db.add_task_event(task["id"], "agent", f"{me['name']} added {name} ({t['symbol']}) to the team")
+    discuss(task, me["name"], "team", "plan", f"Added {name} [{key}] ({t['symbol']}) to the team, reporting to {me['name']}")
+    run.emit("notice", level="info", text=f"Added {name} ({t['symbol']}) to the team")
+    return (f"Added {name} [{key}] ({t['symbol']}) to your team, reporting to you. Assign it work with "
+            f"create_subtasks (assignee \"{key}\") or consult it with ask_agent.")
 
 
 # ---------------------------------------------------------------- everyone
@@ -393,6 +464,7 @@ def record_learning(run, spec, args: dict) -> str:
 
 HANDLERS = {
     "create_subtasks": create_subtasks, "delegate": delegate, "review_subtask": review_subtask,
+    "list_templates": list_templates, "create_template": create_template, "add_team_member": add_team_member,
     "ask_agent": ask_agent, "ask_user": ask_user, "record_learning": record_learning,
 }
 

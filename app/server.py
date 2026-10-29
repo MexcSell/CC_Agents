@@ -579,12 +579,7 @@ def _agent_or_404(aid: int) -> dict:
 
 
 def _unique_key(pid: int, name: str, exclude: int | None = None) -> str:
-    taken = {r["key"] for r in db.query("SELECT key FROM agents WHERE project_id = ? AND id IS NOT ?", (pid, exclude))}
-    key = base = groups.slugify(name) or "agent"
-    n = 2
-    while key in taken:
-        key, n = f"{base}-{n}", n + 1
-    return key
+    return team.unique_key(pid, name, exclude)
 
 
 def _group_or_400(symbol: str) -> dict:
@@ -989,7 +984,7 @@ def delete_group(gid: int):
 # ---------------------------------------------------------------- tasks
 
 class TaskIn(BaseModel):
-    title: str = Field(min_length=1, max_length=300)
+    title: str = Field(default="", max_length=300)    # default: derived from the description
     description: str = ""
     estimated_hours: float | None = None
     next_actions: list[str] = []
@@ -1069,11 +1064,14 @@ def _check_assignee(pid: int, aid: int | None) -> int:
 @app.post("/api/projects/{pid}/tasks")
 def create_task(pid: int, body: TaskIn):
     assignee_id = _check_assignee(pid, body.assignee_id)
+    title = body.title.strip() or team.title_from(body.description)
+    if not title:
+        raise HTTPException(400, "A title or a description is required")
     ts = db.now()
     actions = json.dumps([{"text": a, "done": False} for a in body.next_actions if a.strip()])
     tid = db.execute("INSERT INTO tasks(project_id, assignee_id, title, description, estimated_hours, next_actions, "
                      "created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
-                     (pid, assignee_id, body.title.strip(), body.description, body.estimated_hours, actions, ts, ts))
+                     (pid, assignee_id, title, body.description, body.estimated_hours, actions, ts, ts))
     name = db.get_agent(assignee_id)["name"]
     db.add_task_event(tid, "user", f"Task created and assigned to {name}")
     return _with_runtime(db.get_task(tid))

@@ -91,7 +91,7 @@ def start(pid: int, message: str = ""):
     if not project:
         raise SetupError("Project not found")
     if devteam.is_dev(project):
-        raise SetupError("The development team of this website is set up on the Developer page")
+        raise SetupError("The development team of this website is set up in the Developer project on the Projects page")
     if not Path(project["repo_path"]).is_dir():
         raise SetupError(f"The project repository {project['repo_path']} does not exist")
     conv = conversation(pid)
