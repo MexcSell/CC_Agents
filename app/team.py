@@ -10,7 +10,8 @@ sub-tasks at once, each in its own conversation (an instance of that agent). Eve
 (ask_agent: a read-only conversation with that teammate), ask the user (ask_user: the run pauses until
 the user answers in the UI) and record lessons learned (record_learning), which are fed into its later
 briefings. Delegations, reports, reviews, consultations, questions and lessons are kept as the root
-task's team discussion.
+task's team discussion; agents can also post notes and images there (post_to_discussion). The user writes
+to a task's lead in the discussion (post_user_message), and the lead's answer is posted back as a reply.
 
 The tool handlers run on the calling agent's run thread and block while teammates work; cancelling
 that run cancels the runs it is waiting for.
@@ -119,8 +120,16 @@ def task_conversation(tid: int) -> dict | None:
     return db.get_conversation(row["id"]) if row else None
 
 
-def last_reply(conv_id: int) -> str:
-    for m in reversed(db.list_messages(conv_id)):
+def last_reply(conv_id: int, after: int | None = None) -> str:
+    """The conversation's last assistant text. With `after` (the id of a user message): the answer to that
+    message, from the messages between it and the next user message (tool results do not count)."""
+    messages = db.list_messages(conv_id)
+    if after is not None:
+        messages = [m for m in messages if m["id"] > after]
+        prompt = next((i for i, m in enumerate(messages) if m["role"] == "user" and (isinstance(m["content"], str)
+                       or any(b.get("type") != "tool_result" for b in m["content"]))), None)
+        messages = messages[:prompt]
+    for m in reversed(messages):
         if m["role"] != "assistant":
             continue
         content = m["content"]
@@ -131,9 +140,18 @@ def last_reply(conv_id: int) -> str:
     return ""
 
 
-def discuss(task: dict, sender: str, recipient: str, kind: str, text: str) -> None:
-    db.execute("INSERT INTO discussions(root_task_id, task_id, sender, recipient, kind, text, created_at) "
-               "VALUES(?, ?, ?, ?, ?, ?, ?)", (root_of(task)["id"], task["id"], sender, recipient, kind, text, db.now()))
+def discuss(task: dict, sender: str, recipient: str, kind: str, text: str,
+            images: list[tuple[bytes, str]] = ()) -> int:
+    """Add an entry to the team discussion of the task's tree, with decoded `images` (images.decode).
+    Returns the entry id."""
+    from . import images as img
+    did = db.execute("INSERT INTO discussions(root_task_id, task_id, sender, recipient, kind, text, created_at) "
+                     "VALUES(?, ?, ?, ?, ?, ?, ?)",
+                     (root_of(task)["id"], task["id"], sender, recipient, kind, text, db.now()))
+    if images:
+        db.execute("UPDATE discussions SET images = ? WHERE id = ?",
+                   (json.dumps(img.discussion_save(did, list(images))), did))
+    return did
 
 
 def _context(spec) -> tuple[dict, dict, dict]:
@@ -616,6 +634,141 @@ def answer_question(qid: int, answer: str | None) -> dict:
     return {"ok": True, "delivered": bool(waiter), "resumed": resumed}
 
 
+USER_NOTE = ("The user wrote in the team discussion: {text}\nAnalyse it and act on it: answer, adjust the plan, "
+             "create sub-tasks and delegate the work to the right teammates, or do it yourself.")
+
+# Root task id -> messages from the user (note, images) not yet sent to its assignee, in order. A root task is
+# in here (possibly with an empty list) while a request or a _deliver thread owns its queue: starting a message,
+# waiting for the run to post the reply, or waiting for a busy assignee. Others only append.
+_queues: dict[int, list[tuple[str, list[str]]]] = {}
+_queues_lock = threading.Lock()
+
+
+def post_user_message(pid: int, text: str, encoded: list[str], task_id: int | None) -> dict:
+    """A message from the user in the project's team discussion. Without `task_id` it becomes a new task for
+    the lead; otherwise it goes to the assignee of that task's root task, at once or, when that one is busy,
+    after its current run (queued). Its answer is posted to the discussion as a reply.
+    Returns {"entry_id", "task_id" (the root task), "started", "queued"}."""
+    from . import images as img
+    project = db.get_project(pid)
+    if not project:
+        raise TeamError("Project not found")
+    text = (text or "").strip()
+    files = img.decode(encoded)
+    if not text and not files:
+        raise TeamError("Write a message or attach an image")
+    if not project["agent"]:
+        raise TeamError("This project has no agents")
+    if not Path(project["repo_path"]).is_dir():
+        raise TeamError(f"The project repository {project['repo_path']} does not exist")
+    if task_id is None:
+        lead, ts = project["agent"], db.now()
+        root_id = db.execute("INSERT INTO tasks(project_id, assignee_id, title, description, created_at, updated_at) "
+                             "VALUES(?, ?, ?, ?, ?, ?)",
+                             (pid, lead["id"], title_from(text) or "Message from the user", text, ts, ts))
+        if files:
+            db.update_task(root_id, {"images": img.task_save(root_id, files)})
+        db.add_task_event(root_id, "user", f"Task created from the team discussion and assigned to {lead['name']}")
+        message, attach = "", []   # the kickoff contains the description and its images
+    else:
+        task = db.get_task(task_id)
+        if not task or task["project_id"] != pid:
+            raise TeamError(f"Task #{task_id} is not a task of this project")
+        root = root_of(task)
+        root_id, lead = root["id"], assignee(project, root)
+        message, attach = USER_NOTE.format(text=text or "(see the attached images)"), encoded
+    did = discuss(db.get_task(root_id), "user", lead["name"], "instruction", text, files)
+    with _queues_lock:
+        queued = root_id in _queues   # earlier messages are starting or wait: this one goes after them
+        _queues.setdefault(root_id, []).append((message, attach))
+    if queued:
+        return {"entry_id": did, "task_id": root_id, "started": False, "queued": True}
+    # This request owns the root task's queue until _deliver hands it back
+    try:
+        run, dropped = _start_next(root_id)
+    except Exception as e:
+        _release(root_id, e)
+        raise
+    threading.Thread(target=_deliver, args=(root_id, run), name=f"discussion-{root_id}", daemon=True).start()
+    return {"entry_id": did, "task_id": root_id, "started": run is not None, "queued": not run and not dropped}
+
+
+def _start_next(root_id: int):
+    """Start the assignee of a root task on its first queued message, unless it is busy. Only the queue's owner
+    calls this, so the first message cannot change meanwhile. Returns (run or None, whether it was dropped)."""
+    from . import runs
+    with _queues_lock:
+        message, attach = _queues[root_id][0]
+    conv = task_conversation(root_id)
+    if conv and runs.active_for(conv["id"]):
+        return None, False
+    try:
+        run, _ = start_task(root_id, message, attach)
+    except runs.RunBusy:
+        return None, False
+    except Exception as e:   # e.g. the task or its repository is gone: the entry stays in the discussion
+        log.exception("discussion: delivering a message to task #%s failed", root_id)
+        run = None
+        root = db.get_task(root_id)
+        if root:
+            reason = str(e) if isinstance(e, TeamError) else f"{type(e).__name__}: {e}"
+            discuss(root, assignee(db.get_project(root["project_id"]), root)["name"], "user", "reply",
+                    f"(Not delivered: {reason})")
+    with _queues_lock:
+        _queues[root_id].pop(0)
+    return run, run is None
+
+
+def _deliver(root_id: int, run=None) -> None:
+    """Post the reply to the `run` started for a message from the user, then send the root task's queued
+    messages one after the other, each when the assignee's run has finished."""
+    try:
+        while True:
+            if run:
+                _post_reply(run, root_id)
+            with _queues_lock:
+                if not _queues[root_id]:
+                    del _queues[root_id]
+                    return
+            run, dropped = _start_next(root_id)
+            if not run and not dropped:
+                time.sleep(0.5)
+    except Exception as e:
+        _release(root_id, e)
+
+
+def _release(root_id: int, error: Exception) -> None:
+    """The owner of a root task's queue failed: drop its waiting messages, so that later ones are delivered
+    again, and say so in the discussion."""
+    log.exception("discussion: the message queue of task #%s failed", root_id)
+    with _queues_lock:
+        waiting = len(_queues.pop(root_id, []))
+    try:
+        root = db.get_task(root_id)
+        if root:
+            discuss(root, assignee(db.get_project(root["project_id"]), root)["name"], "user", "reply",
+                    f"(Not delivered: {type(error).__name__}: {error}"
+                    + (f"; {waiting} waiting message(s) dropped" if waiting else "") + ")")
+    except Exception:
+        log.exception("discussion: could not note the failure on task #%s", root_id)
+
+
+def _post_reply(run, root_id: int) -> None:
+    """Wait for a run started by a message from the user, then post the assignee's answer to the discussion."""
+    while not run.done:
+        time.sleep(0.4)
+    root = db.get_task(root_id)
+    if not root:
+        return
+    after = next((e["message_id"] for e in run.events if e["type"] == "user_message"), None)
+    reply = last_reply(run.conv_id, after)
+    if not reply and run.status == "completed":
+        return
+    lead = assignee(db.get_project(root["project_id"]), root)
+    discuss(root, lead["name"], "user", "reply", T.clip(reply, 3000) if reply else
+            f"(No answer: the run {'was stopped' if run.status == 'cancelled' else 'failed'}.)")
+
+
 LEARNING_WHERE = {"self": lambda a: f"for {a['name']} in this project", "team": lambda a: "for the whole project team",
                   "role": lambda a: f"for every agent based on @{a['template']}, in all projects"}
 
@@ -649,10 +802,40 @@ def record_learning(run, spec, args: dict) -> str:
     return f"Lesson recorded {where}."
 
 
+def post_to_discussion(run, spec, args: dict) -> str:
+    from . import images as img
+    project, me, task = _context(spec)
+    text = (args.get("text") or "").strip()
+    if not text:
+        raise T.ToolError("The text is empty.")
+    paths = args.get("images") or []
+    if len(paths) > img.MAX_IMAGES:
+        raise T.ToolError(f"At most {img.MAX_IMAGES} images.")
+    files = []
+    for ref in paths:
+        p = Path(ref).expanduser()
+        p = p if p.is_absolute() else Path(project["repo_path"]) / p
+        if not p.is_file():
+            raise T.ToolError(f"{ref}: no such file.")
+        if p.stat().st_size > img.MAX_BYTES:
+            raise T.ToolError(f"{ref} is larger than {img.MAX_BYTES / 1e6:.2f} MB.")
+        data = p.read_bytes()
+        media_type = img.sniff(data)
+        if not media_type:
+            raise T.ToolError(f"{ref} is not a PNG, JPEG, GIF or WebP image.")
+        files.append((data, media_type))
+    to = (args.get("to") or "team").strip()
+    recipient = to.lower() if to.lower() in ("team", "user") else \
+        find_member([a for a in project["agents"] if a["id"] != me["id"]], to)["name"]
+    discuss(task, me["name"], recipient, "note", text, files)
+    return "Posted to the team discussion" + (f" with {len(files)} image(s)." if files else ".")
+
+
 HANDLERS = {
     "create_subtasks": create_subtasks, "delegate": delegate, "review_subtask": review_subtask,
     "list_templates": list_templates, "create_template": create_template, "add_team_member": add_team_member,
     "ask_agent": ask_agent, "ask_user": ask_user, "record_learning": record_learning,
+    "post_to_discussion": post_to_discussion,
 }
 
 

@@ -1,7 +1,8 @@
 // Project teams: the team tree and agent editor, the agent group picker, questions the agents ask the
 // user, the team discussion of a task, and the knowledge (lessons learned) of a project.
 
-import { api, h, fill, go, field, state, projectBase, toast, modal, confirmDialog, md, timeAgo, fmtDate, modelOptions, effortOptions } from './core.js';
+import { api, h, fill, go, field, state, projectBase, toast, modal, confirmDialog, md, timeAgo, fmtDate, modelOptions, effortOptions, enc } from './core.js';
+import { viewImage } from './conversation.js';
 import { autocomplete, rankMatches, agentTemplateFields } from './templates.js';
 import { pickDirectory } from './files.js';
 import { icon } from './icons.js';
@@ -240,7 +241,25 @@ export function questionsCard(questions, { currentTask, projectId, onChange } = 
 
 // ================================================================ discussion
 
-const KIND_ICON = { plan: '🗂', delegate: '➡️', report: '⬅️', review: '✔️', question: '❓', answer: '💬', learning: '🧠', note: '📝' };
+const KIND_ICON = {
+  plan: '🗂', delegate: '➡️', report: '⬅️', review: '✔️', question: '❓', answer: '💬', learning: '🧠', note: '📝',
+  instruction: '👤', reply: '👑',
+};
+
+/** One discussion entry: who wrote to whom, its text and images. With `projectId` the task becomes a link. */
+function discEntry(e, projectId = null) {
+  const task = `· #${e.task_id} ${e.task_title || ''}`;
+  return h('div', { class: `disc-entry ${e.kind}` },
+    h('div', { class: 'row small' }, h('span', {}, KIND_ICON[e.kind] || '•'), h('b', {}, e.sender), h('span', { class: 'muted' }, '→'), h('b', {}, e.recipient || 'team'),
+      h('span', { class: 'muted' }, e.kind),
+      e.task_id ? projectId ? h('a', { class: 'muted ellipsis', href: `${projectBase(projectId)}/tasks/${e.task_id}` }, task) : h('span', { class: 'muted ellipsis' }, task) : null,
+      h('span', { class: 'grow muted', style: { textAlign: 'right' }, title: fmtDate(e.created_at) }, timeAgo(e.created_at))),
+    e.text ? md(e.text) : null,
+    e.images?.length ? h('div', { class: 'msg-images disc-images' }, e.images.map(im => {
+      const src = `/api/discussion/${e.id}/images/${enc(im.name)}`;
+      return h('img', { src, alt: im.name, title: im.name, loading: 'lazy', onclick: () => viewImage(src) });
+    })) : null);
+}
 
 /** The team discussion of a task tree, loaded on demand. */
 export function discussionCard(taskId, count) {
@@ -249,11 +268,8 @@ export function discussionCard(taskId, count) {
   const load = async () => {
     const entries = await api('GET', `/api/tasks/${taskId}/discussion`, undefined, { quiet: true });
     loaded = true;
-    fill(body, entries.length ? entries.map(e => h('div', { class: `disc-entry ${e.kind}` },
-      h('div', { class: 'row small' }, h('span', {}, KIND_ICON[e.kind] || '•'), h('b', {}, e.sender), h('span', { class: 'muted' }, '→'), h('b', {}, e.recipient || 'team'),
-        h('span', { class: 'muted' }, e.kind), e.task_id ? h('span', { class: 'muted ellipsis' }, `· #${e.task_id} ${e.task_title || ''}`) : null,
-        h('span', { class: 'grow muted', style: { textAlign: 'right' }, title: fmtDate(e.created_at) }, timeAgo(e.created_at))),
-      md(e.text))) : h('div', { class: 'small muted' }, 'No team discussion yet. Delegations, reports, reviews, consultations, questions and lessons show up here.'));
+    fill(body, entries.length ? entries.map(e => discEntry(e))
+      : h('div', { class: 'small muted' }, 'No team discussion yet. Delegations, reports, reviews, consultations, questions and lessons show up here.'));
   };
   const summary = h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, `💬 Team discussion (${count})`);
   const card = h('details', { class: 'card pad-sm', ontoggle: e => { if (e.target.open) load(); } }, summary, body);
@@ -265,6 +281,148 @@ export function discussionCard(taskId, count) {
     }
   };
   return card;
+}
+
+/**
+ * The project's discussion tab: open questions, the team's discussion across all tasks (or one task tree)
+ * and a composer that messages the lead. `imagesInput(textarea)` attaches images (taskImagesInput of
+ * pages.js); `onChanged()` runs after a question is answered. Polls while shown; returns the dispose function.
+ */
+export async function discussionTab(el, project, { imagesInput, onChanged }) {
+  const pid = project.id;
+  const lead = project.agent.name;
+  let rootId = null;
+  let lastId = 0;       // newest entry shown in the feed
+  let threadsSig = '';
+  let questionsSig = null;
+  let stick = true;     // keep the feed scrolled to the newest entry
+  let closed = false;
+  let busy = false;
+
+  const questionsHost = h('div');
+  const filter = h('select', { title: 'Show the discussion of one task', onchange: () => {
+    rootId = +filter.value || null;
+    target.value = filter.value;
+    renderHint();
+    loadFeed(true);
+  } });
+  const feed = h('div', { class: 'discussion disc-feed' }, h('div', { class: 'small muted' }, 'Loading…'));
+  feed.addEventListener('scroll', () => { stick = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 40; });
+  // Images change the height when they load: stay at the bottom if we were there.
+  feed.addEventListener('load', () => { if (stick) feed.scrollTop = feed.scrollHeight; }, true);
+  const text = h('textarea', { rows: 3, placeholder: 'Message the team: an instruction, feedback, an answer…' });
+  const images = imagesInput(text);
+  const target = h('select', { title: 'Who receives the message', onchange: () => renderHint() });
+  const hint = h('div', { class: 'small muted' });
+  const renderHint = () => {
+    hint.textContent = `${target.value ? `The assignee of #${target.value}` : `👑 ${lead}`} reads your message, decides what to do and delegates the work to the team.`;
+  };
+  renderHint();
+  const sendBtn = h('button', { class: 'primary', onclick: () => send() }, 'Send');
+  text.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); } });
+
+  const renderThreads = threads => {
+    const sig = JSON.stringify(threads.map(t => [t.id, t.title, t.count]));
+    if (sig === threadsSig) return;   // don't rebuild an open select
+    threadsSig = sig;
+    const keep = [filter.value, target.value];
+    const label = t => `#${t.id} ${t.title}`;
+    fill(filter, h('option', { value: '' }, 'All tasks'), threads.map(t => h('option', { value: t.id }, `${label(t)} (${t.count})`)));
+    fill(target, h('option', { value: '' }, `New task for 👑 ${lead}`), threads.map(t => h('option', { value: t.id }, label(t))));
+    filter.value = keep[0];
+    target.value = keep[1];
+    if (filter.value !== keep[0]) { rootId = null; filter.value = ''; }   // the task was deleted
+    if (target.value !== keep[1]) target.value = '';
+    renderHint();
+  };
+
+  // A full render on the first load and on a filter change; otherwise new entries are appended.
+  const loadFeed = async (reset = false) => {
+    const root = rootId;
+    const q = new URLSearchParams({ limit: 200 });
+    if (root) q.set('root_id', root);
+    let res;
+    try {
+      res = await api('GET', `/api/projects/${pid}/discussion?${q}`, undefined, { quiet: true });
+    } catch (err) {
+      if (reset || !lastId) fill(feed, h('div', { class: 'small muted' }, `The discussion could not be loaded: ${err.message}`));
+      return;
+    }
+    if (closed || root !== rootId) return;   // the filter changed meanwhile
+    renderThreads(res.threads);
+    const entries = res.entries;
+    if (reset || !lastId || entries.length && entries[0].id > lastId) {
+      fill(feed, entries.length ? entries.map(e => discEntry(e, pid))
+        : h('div', { class: 'small muted' }, root ? 'No discussion on this task yet.'
+          : `No discussion yet. Write to the team below: ${lead} reads it and puts the team to work. Delegations, reports, reviews, questions and the agents' notes show up here.`));
+      stick = true;
+      lastId = entries.length ? entries[entries.length - 1].id : 0;
+    } else {
+      const fresh = entries.filter(e => e.id > lastId);   // an overlapping older response adds nothing
+      if (!fresh.length) return;
+      feed.append(...fresh.map(e => discEntry(e, pid)));
+      lastId = fresh[fresh.length - 1].id;
+    }
+    if (stick) feed.scrollTop = feed.scrollHeight;
+  };
+
+  const loadQuestions = async (force = false) => {
+    const qs = await api('GET', `/api/questions?project_id=${pid}`, undefined, { quiet: true }).catch(() => null);
+    if (!qs || closed) return;
+    // Rebuild only when the questions change, so a half-written answer survives the polling.
+    const sig = qs.map(q => q.id).join(',');
+    if (!force && sig === questionsSig) return;
+    questionsSig = sig;
+    fill(questionsHost, questionsCard(qs, { projectId: pid, onChange: () => { reload(); onChanged?.(); } }));
+  };
+
+  const reload = () => Promise.all([loadQuestions(true), loadFeed()]);
+
+  const send = async () => {
+    if (sendBtn.disabled) return;   // Ctrl+Enter or a second click while sending
+    sendBtn.disabled = true;
+    try {
+      // What is sent now; text typed or images added while the request runs stay in the composer.
+      const sent = text.value;
+      const added = await images.added();
+      if (!sent.trim() && !added.length) { toast('Write a message first.', 'error'); return; }
+      const res = await api('POST', `/api/projects/${pid}/discussion`, { text: sent, images: added, task_id: +target.value || null });
+      const who = res.entry?.recipient || lead;
+      toast(res.queued ? `${who} is busy and reads your message when the current run ends` : `${who} is on it`, 'ok');
+      if (text.value.startsWith(sent)) text.value = text.value.slice(sent.length).trimStart();
+      images.clear(added);
+      stick = true;
+      if (rootId && rootId !== res.task_id) {   // the feed shows another task: switch to the one written to
+        rootId = res.task_id;
+        await loadFeed(true);
+        filter.value = String(res.task_id);
+      } else await loadFeed();
+      target.value = res.task_id;   // a new task is a thread now: follow-ups go to it
+      if (target.value !== String(res.task_id)) target.value = '';
+      renderHint();
+    } finally {
+      sendBtn.disabled = false;
+    }
+  };
+
+  el.append(h('div', { class: 'stack' },
+    questionsHost,
+    h('div', { class: 'card pad-sm disc-tab' },
+      h('div', { class: 'row wrap' }, h('h3', { style: { margin: 0 } }, '💬 Team discussion'), h('div', { class: 'spacer' }), filter),
+      feed,
+      h('div', { class: 'disc-composer' },
+        text,
+        images.el,
+        h('div', { class: 'row wrap' }, h('span', { class: 'small muted' }, 'To'), target, h('div', { class: 'spacer' }),
+          h('span', { class: 'small muted' }, 'Ctrl+Enter to send'), sendBtn),
+        hint))));
+  await Promise.all([loadQuestions(), loadFeed(true)]);
+  const timer = setInterval(async () => {
+    if (busy || document.hidden) return;
+    busy = true;
+    try { await Promise.all([loadQuestions(), loadFeed()]); } finally { busy = false; }
+  }, 5000);
+  return () => { closed = true; clearInterval(timer); };
 }
 
 // ================================================================ knowledge

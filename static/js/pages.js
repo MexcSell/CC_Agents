@@ -7,7 +7,7 @@ import {
 import { icon } from './icons.js';
 import { ConversationView, prepareImage, viewImage, IMAGE_TYPES, MAX_IMAGES } from './conversation.js';
 import { FileExplorer, pickDirectory } from './files.js';
-import { teamTab, knowledgeTab, questionsCard, discussionCard, deleteProject } from './team.js';
+import { teamTab, knowledgeTab, questionsCard, discussionCard, discussionTab, deleteProject } from './team.js';
 
 const runDot = () => h('span', { class: 'dot run', title: 'Agent working' });
 
@@ -576,7 +576,7 @@ async function projectPage(view, [pidParam, tab = 'tasks', taskParam], query = n
   const header = h('div');
   const body = h('div');
   view.append(page);
-  const tabs = [['tasks', '✅ Tasks'], ['team', '👥 Team & settings'], ['knowledge', '🧠 Knowledge'],
+  const tabs = [['tasks', '✅ Tasks'], ['discussion', '💬 Discussion'], ['team', '👥 Team & settings'], ['knowledge', '🧠 Knowledge'],
     ...(dev ? [['server', '🖥 Server & snapshots'], ['files', '🗂 Source files']] : [['files', '🗂 Repository files']])];
   let team = null;   // the Team & settings tab, when it is open
   const changed = () => onChanged?.().catch(() => {});
@@ -657,12 +657,16 @@ function devSwitch(active) {
 
 const taskImageUrl = (taskId, name) => `/api/tasks/${taskId}/images/${enc(name)}`;
 
+  if (tab === 'discussion') {
+    return discussionTab(body, project, { imagesInput: text => taskImagesInput(text, null, { per: 'message', onto: 'the message' }), onChanged: changed });
+  }
 /**
  * Images of a task description: 📎 button, or paste / drop images onto the description textarea.
- * With a task, its stored images are shown too and can be removed.
- * Returns { el, added() -> [data: URL], removed() -> [name] }; both wait for images still being read.
+ * With a task, its stored images are shown too and can be removed. `per` and `onto` word the limit and the hint.
+ * Returns { el, added() -> [data: URL], removed() -> [name], clear(only) }; added/removed wait for images still being read,
+ * clear(only) removes just the given data: URLs (all images without it).
  */
-function taskImagesInput(textarea, task = null) {
+function taskImagesInput(textarea, task = null, { per = 'task', onto = 'the description' } = {}) {
   const stored = task?.images || [];
   const removed = new Set();
   const added = [];
@@ -680,7 +684,7 @@ function taskImagesInput(textarea, task = null) {
   const addImages = files => (pending = pending.then(async () => {
     for (const file of files) {
       if (!IMAGE_TYPES.includes(file.type)) { toast(`${file.name}: only PNG, JPEG, GIF and WebP images can be attached.`, 'error'); continue; }
-      if (stored.length - removed.size + added.length >= MAX_IMAGES) { toast(`At most ${MAX_IMAGES} images per task.`, 'error'); break; }
+      if (stored.length - removed.size + added.length >= MAX_IMAGES) { toast(`At most ${MAX_IMAGES} images per ${per}.`, 'error'); break; }
       try {
         added.push(await prepareImage(file));
       } catch {
@@ -712,7 +716,7 @@ function taskImagesInput(textarea, task = null) {
     el: h('div', { class: 'task-images' },
       h('div', { class: 'row' }, fileInput,
         h('button', { class: 'sm', title: `Attach up to ${MAX_IMAGES} images`, onclick: () => fileInput.click() }, '📎 Attach images'),
-        h('span', { class: 'small muted' }, 'or paste / drop them onto the description')),
+        h('span', { class: 'small muted' }, `or paste / drop them onto ${onto}`)),
       tray),
     added: async () => { await pending; return [...added]; },
     removed: async () => { await pending; return [...removed]; },
@@ -740,6 +744,12 @@ function newTaskModal(project, onCreated) {
         const added = await images.added();
         if (!title.value.trim() && !desc.value.trim()) { toast('Enter a title or a description.', 'error'); return false; }
         try {
+    clear: only => {
+      if (!only) added.length = 0;
+      for (const src of only || []) { const i = added.indexOf(src); if (i >= 0) added.splice(i, 1); }
+      removed.clear();
+      render();
+    },
           const task = await api('POST', `/api/projects/${project.id}/tasks`, {
             title: title.value, description: desc.value, images: added,
             estimated_hours: est.value === '' ? null : +est.value,

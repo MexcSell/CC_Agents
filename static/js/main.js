@@ -11,9 +11,9 @@ const routes = [
   // The Developer pages are reached through the built-in Developer project on the Projects page.
   [/^#\/dev(?:\/(\d+))?$/, pages.devPage, 'projects'],
   // The project list and a project share one page: [project id, or 'dev' for the development team; tab; task].
-  [/^#\/(dev)\/team(?:\/(tasks|files|team|knowledge|agent|server))?(?:\/(\d+))?$/, pages.projectsPage, 'projects'],
+  [/^#\/(dev)\/team(?:\/(tasks|discussion|files|team|knowledge|agent|server))?(?:\/(\d+))?$/, pages.projectsPage, 'projects'],
   [/^#\/projects$/, pages.projectsPage, 'projects'],
-  [/^#\/projects\/(\d+)(?:\/(tasks|files|team|knowledge|agent))?(?:\/(\d+))?$/, pages.projectsPage, 'projects'],
+  [/^#\/projects\/(\d+)(?:\/(tasks|discussion|files|team|knowledge|agent))?(?:\/(\d+))?$/, pages.projectsPage, 'projects'],
   [/^#\/templates(?:\/(groups))?$/, templatesPage, 'templates'],
   [/^#\/files$/, pages.filesPage, 'files'],
   [/^#\/settings$/, pages.settingsPage, 'settings'],

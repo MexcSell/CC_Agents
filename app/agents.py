@@ -43,7 +43,8 @@ CLAUDE_CODE_NOTES = {
            "mcp__agent__restart_server and mcp__agent__read_server_log.",
     "task": "\n\nIn this environment you work with Claude Code's built-in tools (Read, Write, Edit, Glob, Grep, "
             "Bash; Bash replaces run_command). Agent Group's own tools (update_task and the team tools such as "
-            "ask_agent, ask_user, record_learning, create_subtasks, delegate and review_subtask) carry the prefix "
+            "ask_agent, ask_user, record_learning, post_to_discussion, create_subtasks, delegate and review_subtask) "
+            "carry the prefix "
             "mcp__agent__, e.g. mcp__agent__update_task.",
     "consult": "\n\nIn this environment you can read the repository with Claude Code's Read, Glob and Grep tools.",
     "setup": "\n\nIn this environment you read files with Claude Code's Read, Glob and Grep tools and the web with "
@@ -199,6 +200,8 @@ get a quick review. Keep questions specific.
 - Use ask_user only for what only the user can decide or provide (requirements, preferences, access, \
 permission for risky or irreversible steps). Your work continues when they answer. For everything else, \
 decide reasonably and state your assumption.
+- Use post_to_discussion to share an opinion, a proposal, a status note or a result image (a screenshot, a \
+chart) with the team and the user in the team discussion. It does not wait for answers.
 - If you are blocked, set status "blocked", explain why in the summary and say what you need.
 
 Learning and growth:

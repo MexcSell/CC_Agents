@@ -1143,12 +1143,61 @@ def get_task(tid: int):
     return task
 
 
+def _entries(rows: list[dict]) -> list[dict]:
+    for r in rows:
+        r["images"] = json.loads(r["images"])
+    return rows
+
+
 @app.get("/api/tasks/{tid}/discussion")
 def task_discussion(tid: int):
     """The team discussion of the task tree the task belongs to."""
     root = team.root_of(_task_or_404(tid))
-    return db.query("SELECT d.*, t.title AS task_title FROM discussions d LEFT JOIN tasks t ON t.id = d.task_id "
-                    "WHERE d.root_task_id = ? ORDER BY d.id", (root["id"],))
+    return _entries(db.query("SELECT d.*, t.title AS task_title FROM discussions d LEFT JOIN tasks t "
+                             "ON t.id = d.task_id WHERE d.root_task_id = ? ORDER BY d.id", (root["id"],)))
+
+
+ENTRY_SQL = ("SELECT d.*, r.title AS root_title, t.title AS task_title FROM discussions d "
+             "JOIN tasks r ON r.id = d.root_task_id LEFT JOIN tasks t ON t.id = d.task_id ")
+
+
+@app.get("/api/projects/{pid}/discussion")
+def project_discussion(pid: int, root_id: int | None = None, limit: int = 200):
+    """The team discussion of all the project's tasks (or of one root task): the newest `limit` entries, oldest
+    first, and every open root task as a thread with its entry count and latest activity."""
+    _project_or_404(pid)
+    sql, params = ENTRY_SQL + "WHERE r.project_id = ?", [pid]
+    if root_id is not None:
+        sql += " AND d.root_task_id = ?"
+        params.append(root_id)
+    rows = db.query(sql + " ORDER BY d.id DESC LIMIT ?", (*params, max(1, min(limit, 500))))
+    threads = db.query("SELECT t.id, t.title, t.status, COUNT(d.id) AS count, MAX(d.created_at) AS last_at "
+                       "FROM tasks t LEFT JOIN discussions d ON d.root_task_id = t.id WHERE t.project_id = ? "
+                       "AND t.parent_id IS NULL AND t.status != 'cancelled' GROUP BY t.id "
+                       "ORDER BY last_at IS NULL, last_at DESC, t.id DESC", (pid,))
+    return {"entries": _entries(rows[::-1]), "threads": threads}
+
+
+class DiscussionIn(BaseModel):
+    text: str = Field(default="", max_length=100_000)
+    images: list[str] = []         # base64 image data, optionally as data: URLs
+    task_id: int | None = None     # None: a new task for the lead; else the message goes to its root task
+
+
+@app.post("/api/projects/{pid}/discussion")
+def post_discussion(pid: int, body: DiscussionIn):
+    """A message from the user to the lead in the team discussion (see team.post_user_message)."""
+    _project_or_404(pid)
+    out = team.post_user_message(pid, body.text, body.images, body.task_id)
+    entry = _entries(db.query(ENTRY_SQL + "WHERE d.id = ?", (out.pop("entry_id"),)))[0]
+    return {"entry": entry, **out}
+
+
+@app.get("/api/discussion/{did}/images/{name}")
+def get_discussion_image(did: int, name: str):
+    db.one("SELECT 1 FROM discussions WHERE id = ?", (did,)) or not_found("Image not found")
+    p = images.discussion_path(did, name) or not_found("Image not found")
+    return FileResponse(p, headers={"Cache-Control": "private, max-age=31536000, immutable"})
 
 
 @app.put("/api/tasks/{tid}")

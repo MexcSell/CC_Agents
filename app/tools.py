@@ -123,6 +123,17 @@ TEAM_TOOLS = [
                      "description": "self: for you in this project. team: for every agent of this project. role: "
                                     "for every agent based on your template, in all projects (general know-how)."}},
           ["lesson", "scope"]),
+    _tool("post_to_discussion",
+          "Share an opinion, a proposal, a status note or a result image (e.g. a screenshot or a chart) with the "
+          "team and the user in the team discussion. It does not wait for answers; use ask_user or ask_agent for "
+          "that.",
+          {"text": {"type": "string", "description": "The message, in Markdown."},
+           "images": {"type": "array", "items": {"type": "string"},
+                      "description": "Optional PNG, JPEG, GIF or WebP files to attach (at most 8, each up to 3.75 "
+                                     "MB): paths relative to the project repository, or absolute."},
+           "to": {"type": "string", "description": "Who it is for: a teammate's key or name, 'user' or 'team'. "
+                                                   "Default 'team'."}},
+          ["text"]),
 ]
 
 # Agents that others report to: plan, delegate and review.

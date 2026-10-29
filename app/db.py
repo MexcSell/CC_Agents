@@ -130,8 +130,10 @@ CREATE TABLE IF NOT EXISTS discussions (
     task_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
     sender TEXT NOT NULL,
     recipient TEXT NOT NULL DEFAULT '',
-    kind TEXT NOT NULL,                   -- plan, delegate, report, review, question, answer, learning, note
+    kind TEXT NOT NULL,                   -- plan, delegate, report, review, question, answer, learning, note,
+                                          -- instruction (the user to the lead), reply (the lead's answer to it)
     text TEXT NOT NULL,
+    images TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS questions (
@@ -201,6 +203,9 @@ with _lock:
         _conn.execute("ALTER TABLE tasks ADD COLUMN depends_on TEXT NOT NULL DEFAULT '[]'")
     if "files" not in task_cols:   # JSON list of files, folders or globs the sub-task changes (team.delegate)
         _conn.execute("ALTER TABLE tasks ADD COLUMN files TEXT NOT NULL DEFAULT '[]'")
+    if "images" not in {r["name"] for r in _conn.execute("PRAGMA table_info(discussions)")}:
+        # JSON list of {name, media_type}: images of a discussion entry (app/images.py)
+        _conn.execute("ALTER TABLE discussions ADD COLUMN images TEXT NOT NULL DEFAULT '[]'")
     # Projects used to have exactly one agent (UNIQUE project_id). Rebuild the table as a team table;
     # each existing agent becomes its project's lead.
     if any(ix["unique"] and ix["origin"] == "u" for ix in _conn.execute("PRAGMA index_list(agents)")):

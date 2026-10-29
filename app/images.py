@@ -6,6 +6,9 @@ Messages API image block when the history is sent to the model.
 
 Images attached to a task description live in TASK_DIR/<task id>/<name>; the task's `images` column
 lists them as {"name", "media_type"}. They are copied into the conversation's folder when an agent starts.
+
+Images of a team discussion entry (from the user or an agent) live in DISCUSSION_DIR/<entry id>/<name>, listed
+the same way in the entry's `images` column.
 """
 
 import base64
@@ -21,6 +24,8 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 TASK_DIR = DATA_DIR / "task_images"   # not under UPLOAD_DIR: prune() treats its folders as conversations
 TASK_DIR.mkdir(parents=True, exist_ok=True)
+DISCUSSION_DIR = DATA_DIR / "discussion_images"
+DISCUSSION_DIR.mkdir(parents=True, exist_ok=True)
 MAX_IMAGES = 8
 # The API accepts base64 payloads up to 5 MB; the browser downscales images to stay below this.
 MAX_BYTES = 3_750_000
@@ -31,7 +36,7 @@ class ImageError(Exception):
     pass
 
 
-def _sniff(data: bytes) -> str | None:
+def sniff(data: bytes) -> str | None:
     """The media type from the file's signature (the API rejects a type that does not match the bytes)."""
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
@@ -54,7 +59,7 @@ def decode(encoded: list[str], limit: int = MAX_IMAGES) -> list[tuple[bytes, str
             data = base64.b64decode(item.split(",", 1)[-1], validate=True)
         except (binascii.Error, ValueError):
             raise ImageError(f"Image {i} is not valid base64 data")
-        media_type = _sniff(data)
+        media_type = sniff(data)
         if not media_type:
             raise ImageError(f"Image {i} is not a PNG, JPEG, GIF or WebP image")
         if len(data) > MAX_BYTES:
@@ -123,12 +128,16 @@ def task_save(tid: int, files: list[tuple[bytes, str]]) -> list[dict]:
     return [{"name": name, "media_type": media_type} for name, media_type in _write(TASK_DIR / str(tid), files)]
 
 
-def task_path(tid: int, name: str) -> Path | None:
-    """The file of a task image, or None if the name is malformed or the file is missing."""
+def _stored(folder: Path, name: str) -> Path | None:
     if not name or "/" in name or "\\" in name or name.startswith("."):
         return None
-    p = TASK_DIR / str(tid) / name
+    p = folder / name
     return p if p.is_file() and not p.is_symlink() else None
+
+
+def task_path(tid: int, name: str) -> Path | None:
+    """The file of a task image, or None if the name is malformed or the file is missing."""
+    return _stored(TASK_DIR / str(tid), name)
 
 
 def task_delete(tid: int, names: list[str]) -> None:
@@ -157,9 +166,22 @@ def task_to_conversation(task: dict, cid: int, sent: list[str] = ()) -> list[dic
     return blocks
 
 
+# ---------------------------------------------------------------- discussion images
+
+def discussion_save(did: int, files: list[tuple[bytes, str]]) -> list[dict]:
+    """Store decoded images for discussion entry `did`; returns the entries for its `images` column."""
+    return [{"name": name, "media_type": media_type}
+            for name, media_type in _write(DISCUSSION_DIR / str(did), files)]
+
+
+def discussion_path(did: int, name: str) -> Path | None:
+    """The file of a discussion image, or None if the name is malformed or the file is missing."""
+    return _stored(DISCUSSION_DIR / str(did), name)
+
+
 def prune() -> None:
-    """Delete the images of conversations and tasks that no longer exist (they also go when a topic, task or
-    project is deleted)."""
+    """Delete the images of conversations, tasks and discussion entries that no longer exist (they also go
+    when a topic, task or project is deleted)."""
     existing = {str(r["id"]) for r in db.query("SELECT id FROM conversations")}
     for d in UPLOAD_DIR.iterdir():
         if d.is_dir() and d.name not in existing:
@@ -167,4 +189,8 @@ def prune() -> None:
     tasks = {str(r["id"]) for r in db.query("SELECT id FROM tasks")}
     for d in TASK_DIR.iterdir():
         if d.is_dir() and d.name not in tasks:
+            shutil.rmtree(d, ignore_errors=True)
+    entries = {str(r["id"]) for r in db.query("SELECT id FROM discussions")}
+    for d in DISCUSSION_DIR.iterdir():
+        if d.is_dir() and d.name not in entries:
             shutil.rmtree(d, ignore_errors=True)
