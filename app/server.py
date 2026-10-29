@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Res
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import agents, db, fsops, images, maintenance, runs, usage
+from . import agents, db, fsops, images, maintenance, runs, templates, usage
 from .config import (ACCESS_TOKEN, APP_ROOT, EFFORTS, HOST, MODELS, PORT, RESTART_EXIT_CODE,
                      STATIC_DIR)
 
@@ -57,6 +57,11 @@ async def fs_error(_: Request, exc: fsops.FsError):
 
 @app.exception_handler(images.ImageError)
 async def image_error(_: Request, exc: images.ImageError):
+    return JSONResponse({"detail": str(exc)}, status_code=400)
+
+
+@app.exception_handler(templates.TemplateError)
+async def template_error(_: Request, exc: templates.TemplateError):
     return JSONResponse({"detail": str(exc)}, status_code=400)
 
 
@@ -488,6 +493,8 @@ class AgentIn(BaseModel):
     instructions: str = ""
     model: str = "claude-opus-5-5"
     effort: str = "high"
+    template: str = ""            # symbol of the agent template it is based on, e.g. "@code-reviewer"
+    subagents: list[str] = []     # symbols of the templates that become its internal agents
 
 
 class ProjectIn(BaseModel):
@@ -510,6 +517,10 @@ def _check_agent(a: AgentIn) -> None:
         raise HTTPException(400, f"Unknown model {a.model}")
     if a.effort not in EFFORTS:
         raise HTTPException(400, f"Unknown effort {a.effort}")
+    a.template = templates.parse_symbol(a.template)
+    if a.template and not templates.by_slug(a.template):
+        raise HTTPException(400, f"Unknown agent template {templates.symbol(a.template)}")
+    a.subagents = templates.validate_refs(a.subagents)
 
 
 def _check_repo(path: str, create: bool) -> str:
@@ -536,7 +547,7 @@ def _project_or_404(pid: int) -> dict:
 def list_projects():
     projects = db.query("SELECT * FROM projects ORDER BY updated_at DESC")
     for p in projects:
-        p["agent"] = db.one("SELECT id, name, model, effort FROM agents WHERE project_id = ?", (p["id"],))
+        p["agent"] = db.one("SELECT id, name, model, effort, template FROM agents WHERE project_id = ?", (p["id"],))
         stats = db.one("SELECT COUNT(*) total, SUM(status = 'done') done, SUM(status = 'in_progress') active, "
                        "AVG(progress) avg_progress, SUM(estimated_hours) est FROM tasks WHERE project_id = ?",
                        (p["id"],))
@@ -558,9 +569,10 @@ def create_project(body: ProjectIn):
             "INSERT INTO projects(name, description, repo_path, created_at, updated_at) VALUES(?, ?, ?, ?, ?)",
             (body.name.strip(), body.description, repo, ts, ts)).lastrowid
         db._conn.execute(
-            "INSERT INTO agents(project_id, name, role, instructions, model, effort, created_at, updated_at) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
-            (pid, agent.name.strip(), agent.role, agent.instructions, agent.model, agent.effort, ts, ts))
+            "INSERT INTO agents(project_id, name, role, instructions, model, effort, template, subagents, "
+            "created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (pid, agent.name.strip(), agent.role, agent.instructions, agent.model, agent.effort, agent.template,
+             json.dumps(agent.subagents), ts, ts))
     return _project_or_404(pid)
 
 
@@ -584,10 +596,74 @@ def update_project(pid: int, body: ProjectPatch):
 def update_agent(pid: int, body: AgentIn):
     _project_or_404(pid)
     _check_agent(body)
-    db.execute("UPDATE agents SET name = ?, role = ?, instructions = ?, model = ?, effort = ?, updated_at = ? "
-               "WHERE project_id = ?",
-               (body.name.strip(), body.role, body.instructions, body.model, body.effort, db.now(), pid))
+    db.execute("UPDATE agents SET name = ?, role = ?, instructions = ?, model = ?, effort = ?, template = ?, "
+               "subagents = ?, updated_at = ? WHERE project_id = ?",
+               (body.name.strip(), body.role, body.instructions, body.model, body.effort, body.template,
+                json.dumps(body.subagents), db.now(), pid))
     return _project_or_404(pid)
+
+
+# ---------------------------------------------------------------- agent templates
+
+class TemplateIn(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    slug: str = ""                # the symbol, with or without "@"; derived from the name when empty
+    description: str = ""
+    role: str = ""
+    instructions: str = ""
+    rules: list[str] = []
+    expertise: list[str] = []
+    skills: list[str] = []
+    subagents: list[str] = []
+    model: str = ""               # "" = the model of the agent that uses it
+    effort: str = ""
+
+
+def _template_or_404(tid: int) -> dict:
+    return templates.get(tid) or not_found("Template not found")
+
+
+def _check_template(body: TemplateIn) -> dict:
+    if body.model and body.model not in MODEL_IDS:
+        raise HTTPException(400, f"Unknown model {body.model}")
+    if body.effort and body.effort not in EFFORTS:
+        raise HTTPException(400, f"Unknown effort {body.effort}")
+    return body.model_dump()
+
+
+@app.get("/api/templates")
+def list_templates():
+    return templates.list_all()
+
+
+@app.get("/api/templates/vocabulary")
+def template_vocabulary():
+    return templates.vocabulary()
+
+
+@app.post("/api/templates")
+def create_template(body: TemplateIn):
+    return templates.save(_check_template(body))
+
+
+@app.get("/api/templates/{tid}")
+def get_template(tid: int):
+    t = _template_or_404(tid)
+    t["used_by"] = templates.usages().get(t["slug"], [])
+    return t
+
+
+@app.put("/api/templates/{tid}")
+def update_template(tid: int, body: TemplateIn):
+    _template_or_404(tid)
+    return templates.save(_check_template(body), tid)
+
+
+@app.delete("/api/templates/{tid}")
+def delete_template(tid: int):
+    _template_or_404(tid)
+    templates.delete(tid)
+    return {"ok": True}
 
 
 @app.delete("/api/projects/{pid}")

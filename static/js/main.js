@@ -3,6 +3,7 @@
 import { api, h, fill, state, banner, resizer } from './core.js';
 import * as pages from './pages.js';
 import { initUsage, setUsageScope } from './usage.js';
+import { templatesPage } from './templates.js';
 
 const routes = [
   [/^#?\/?$/, pages.dashboardPage, 'dashboard'],
@@ -10,6 +11,7 @@ const routes = [
   [/^#\/dev(?:\/(\d+))?$/, pages.devPage, 'dev'],
   [/^#\/projects$/, pages.projectsPage, 'projects'],
   [/^#\/projects\/(\d+)(?:\/(tasks|files|agent))?(?:\/(\d+))?$/, pages.projectPage, 'projects'],
+  [/^#\/templates$/, templatesPage, 'templates'],
   [/^#\/files$/, pages.filesPage, 'files'],
   [/^#\/settings$/, pages.settingsPage, 'settings'],
   [/^#\/c\/(\d+)$/, pages.conversationRedirect, null],

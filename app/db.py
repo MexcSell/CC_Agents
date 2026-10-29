@@ -85,6 +85,22 @@ CREATE TABLE IF NOT EXISTS messages (
     content TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS agent_templates (
+    id INTEGER PRIMARY KEY,
+    slug TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL DEFAULT '',
+    instructions TEXT NOT NULL DEFAULT '',
+    rules TEXT NOT NULL DEFAULT '[]',
+    expertise TEXT NOT NULL DEFAULT '[]',
+    skills TEXT NOT NULL DEFAULT '[]',
+    subagents TEXT NOT NULL DEFAULT '[]',
+    model TEXT NOT NULL DEFAULT '',
+    effort TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, id);
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_conv_kind ON conversations(kind, topic_id, task_id);
@@ -97,6 +113,11 @@ with _lock:
         _conn.execute("ALTER TABLE messages ADD COLUMN engine TEXT NOT NULL DEFAULT 'api'")
     if "usage" not in {r["name"] for r in _conn.execute("PRAGMA table_info(messages)")}:
         _conn.execute("ALTER TABLE messages ADD COLUMN usage TEXT")
+    agent_cols = {r["name"] for r in _conn.execute("PRAGMA table_info(agents)")}
+    if "template" not in agent_cols:   # slug of the agent template the agent is based on, '' for none
+        _conn.execute("ALTER TABLE agents ADD COLUMN template TEXT NOT NULL DEFAULT ''")
+    if "subagents" not in agent_cols:  # JSON list of template slugs: the agent's internal agents
+        _conn.execute("ALTER TABLE agents ADD COLUMN subagents TEXT NOT NULL DEFAULT '[]'")
 
 
 def now() -> str:
@@ -272,5 +293,7 @@ def add_task_event(tid: int, source: str, text: str) -> None:
 def get_project(pid: int) -> dict | None:
     project = one("SELECT * FROM projects WHERE id = ?", (pid,))
     if project:
-        project["agent"] = one("SELECT * FROM agents WHERE project_id = ?", (pid,))
+        project["agent"] = agent = one("SELECT * FROM agents WHERE project_id = ?", (pid,))
+        if agent:
+            agent["subagents"] = json.loads(agent["subagents"])
     return project

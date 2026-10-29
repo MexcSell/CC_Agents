@@ -6,6 +6,7 @@ import {
 } from './core.js';
 import { ConversationView } from './conversation.js';
 import { FileExplorer, pickDirectory } from './files.js';
+import { agentTemplateFields } from './templates.js';
 
 const runDot = () => h('span', { class: 'dot run', title: 'Agent working' });
 
@@ -69,6 +70,7 @@ export async function dashboardPage(view) {
         h('ul', { style: { margin: 0, paddingLeft: '18px', lineHeight: 1.8 } },
           h('li', {}, h('b', {}, 'Chat: '), 'create topics and hold conversations with Claude about them. History is stored; delete single conversations or clear a topic.'),
           h('li', {}, h('b', {}, 'Projects: '), 'register a project with its repository folder. Each project has its own agent; assign tasks and it carries them out, reporting estimate, progress, insights and next actions.'),
+          h('li', {}, h('b', {}, 'Templates: '), 'define reusable agent profiles (role, expertise, skills, rules) with a symbol like @code-reviewer, then base project agents on them or add them as internal agents.'),
           h('li', {}, h('b', {}, 'Files: '), 'browse the whole file system or a project repository: create, open, edit, move and delete files.'),
           h('li', {}, h('b', {}, 'Developer: '), 'an agent that develops and modifies this website itself and restarts it, with automatic code snapshots.'))));
   };
@@ -415,8 +417,17 @@ function showServerLog() {
 
 // ================================================================ projects
 
-async function registerProjectModal() {
-  const settings = await api('GET', '/api/settings');
+// Fills a project agent form from a chosen template: its role when the role is still empty, and its
+// default model and effort.
+const applyTemplate = (t, { role, model, effort }) => {
+  if (!t) return;
+  if (!role.value.trim() && t.role) role.value = t.role;
+  if (t.model) model.value = t.model;
+  if (t.effort) effort.value = t.effort;
+};
+
+async function registerProjectModal({ template = '' } = {}) {
+  const [settings, templates] = await Promise.all([api('GET', '/api/settings'), api('GET', '/api/templates')]);
   const home = '/home';
   const name = h('input', { type: 'text', placeholder: 'e.g. Website redesign' });
   const desc = h('textarea', { rows: 3, placeholder: 'Goal and context of the project' });
@@ -436,6 +447,8 @@ async function registerProjectModal() {
   const instructions = h('textarea', { rows: 4, placeholder: 'Conventions, constraints and preferences the agent should follow, e.g. "Write tests for every change. Use TypeScript."' });
   const model = h('select', {}, modelOptions(settings.project_model));
   const effort = h('select', {}, effortOptions(settings.project_effort));
+  const tpl = agentTemplateFields(templates, { template, onTemplate: t => applyTemplate(t, { role, model, effort }) });
+  applyTemplate(templates.find(t => t.slug === template), { role, model, effort });
   modal({
     title: 'Register a project',
     wide: true,
@@ -448,8 +461,10 @@ async function registerProjectModal() {
       h('label', { class: 'check' }, create, 'Create the folder if it does not exist'),
       h('h3', { style: { margin: '6px 0 0' } }, '🤖 Project agent'),
       h('div', { class: 'small muted', style: { marginTop: '-8px' } }, 'Tasks you create in this project are assigned to this agent, which carries them out.'),
+      tpl.templateField,
       h('div', { class: 'form-grid two' }, field('Agent name', agentName), field('Role', role)),
       field('Instructions', instructions),
+      tpl.subagentsField,
       h('div', { class: 'form-grid two' }, field('Model', model), field('Effort', effort, 'Higher effort = deeper reasoning, more tokens.'))),
     actions: [{
       label: 'Register project', kind: 'primary', onClick: async () => {
@@ -457,7 +472,7 @@ async function registerProjectModal() {
         try {
           const p = await api('POST', '/api/projects', {
             name: name.value, description: desc.value, repo_path: repo.value.trim(), create_repo: create.checked,
-            agent: { name: agentName.value || 'Project Agent', role: role.value, instructions: instructions.value, model: model.value, effort: effort.value },
+            agent: { name: agentName.value || 'Project Agent', role: role.value, instructions: instructions.value, model: model.value, effort: effort.value, ...tpl.get() },
           });
           toast(`Project "${p.name}" registered`, 'ok');
           go(`#/projects/${p.id}`);
@@ -476,7 +491,7 @@ export async function projectsPage(view, _params, query) {
     h('div', { class: 'row' }, h('h2', { class: 'grow ellipsis', style: { margin: 0 } }, p.name), p.running ? h('span', { class: 'badge accent' }, runDot(), `${p.running} running`) : null),
     p.description ? h('div', { class: 'muted small', style: { display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' } }, p.description) : null,
     h('div', { class: 'path' }, '📁 ', p.repo_path, p.repo_exists ? '' : '  ⚠ missing'),
-    h('div', { class: 'small' }, '🤖 ', h('b', {}, p.agent?.name || '—'), h('span', { class: 'muted' }, ` · ${p.agent?.model || ''}`)),
+    h('div', { class: 'small' }, '🤖 ', h('b', {}, p.agent?.name || '—'), p.agent?.template ? [' ', h('code', { class: 'sym' }, `@${p.agent.template}`)] : null, h('span', { class: 'muted' }, ` · ${p.agent?.model || ''}`)),
     progressBar(Math.round(p.stats.avg_progress || 0), p.stats.total > 0 && p.stats.done === p.stats.total),
     h('div', { class: 'row small muted' },
       h('span', {}, `${p.stats.done}/${p.stats.total} tasks done`),
@@ -491,7 +506,7 @@ export async function projectsPage(view, _params, query) {
         h('button', { class: 'primary', onclick: registerProjectModal }, 'Register your first project')));
   if (query.get('new')) {
     history.replaceState(null, '', '#/projects');
-    registerProjectModal();
+    registerProjectModal({ template: query.get('template') || '' });
   }
 }
 
@@ -507,6 +522,8 @@ export async function projectPage(view, [pidParam, tab = 'tasks', taskParam]) {
     h('div', { class: 'page-head', style: { marginBottom: '8px' } },
       h('h1', {}, project.name),
       h('span', { class: 'badge accent', title: `${project.agent.model} · effort ${project.agent.effort}` }, `🤖 ${project.agent.name}`),
+      project.agent.template ? h('code', { class: 'sym', title: 'Agent template' }, `@${project.agent.template}`) : null,
+      project.agent.subagents.length ? h('span', { class: 'small muted', title: 'Internal agents' }, '🤝 ', project.agent.subagents.map(s => `@${s}`).join(' ')) : null,
       h('div', { class: 'spacer' }),
       h('a', { class: 'mono small', href: `#/projects/${pid}/files`, title: 'Open the repository' }, `📁 ${project.repo_path}`)),
     project.repo_exists ? null : h('div', { class: 'notice warn', style: { marginBottom: '10px' } }, `The repository folder ${project.repo_path} does not exist. Fix it under "Agent & settings".`),
@@ -524,7 +541,7 @@ export async function projectPage(view, [pidParam, tab = 'tasks', taskParam]) {
     return () => fx.dispose();
   }
   if (tab === 'agent') {
-    agentSettings(body, project, p => { project = p; renderHeader(); });
+    await agentSettings(body, project, p => { project = p; renderHeader(); });
     return;
   }
   const tasks = await tasksTab(body, project, taskParam ? +taskParam : null);
@@ -535,13 +552,15 @@ export async function projectPage(view, [pidParam, tab = 'tasks', taskParam]) {
   };
 }
 
-function agentSettings(el, project, onSaved) {
+async function agentSettings(el, project, onSaved) {
   const a = project.agent;
+  const templates = await api('GET', '/api/templates');
   const agentName = h('input', { type: 'text', value: a.name });
   const role = h('input', { type: 'text', value: a.role, placeholder: 'e.g. Senior full-stack developer' });
   const instructions = h('textarea', { rows: 6, value: a.instructions, placeholder: 'Conventions, constraints and preferences for this agent' });
   const model = h('select', {}, modelOptions(a.model));
   const effort = h('select', {}, effortOptions(a.effort));
+  const tpl = agentTemplateFields(templates, { template: a.template, subagents: a.subagents, onTemplate: t => applyTemplate(t, { role, model, effort }) });
   const name = h('input', { type: 'text', value: project.name });
   const desc = h('textarea', { rows: 3, value: project.description });
   const repo = h('input', { type: 'text', class: 'mono', value: project.repo_path });
@@ -550,12 +569,14 @@ function agentSettings(el, project, onSaved) {
     h('div', { class: 'card form-grid' },
       h('h2', { style: { margin: 0 } }, '🤖 Project agent'),
       h('div', { class: 'small muted' }, 'Every task in this project is assigned to this agent. Changes apply from the next agent run.'),
+      tpl.templateField,
       h('div', { class: 'form-grid two' }, field('Name', agentName), field('Role', role)),
       field('Instructions', instructions),
+      tpl.subagentsField,
       h('div', { class: 'form-grid two' }, field('Model', model), field('Effort', effort)),
       h('div', {}, h('button', {
         class: 'primary', onclick: async () => {
-          const p = await api('PUT', `/api/projects/${project.id}/agent`, { name: agentName.value, role: role.value, instructions: instructions.value, model: model.value, effort: effort.value });
+          const p = await api('PUT', `/api/projects/${project.id}/agent`, { name: agentName.value, role: role.value, instructions: instructions.value, model: model.value, effort: effort.value, ...tpl.get() });
           toast('Agent saved', 'ok');
           onSaved(p);
         },

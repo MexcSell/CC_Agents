@@ -8,7 +8,7 @@ they reach the agent through the next user message instead.
 
 from dataclasses import dataclass, field
 
-from . import db, maintenance, tools as T
+from . import db, maintenance, templates, tools as T
 from .config import APP_ROOT, DEV_PROTECTED_DIRS, PORT
 
 
@@ -23,6 +23,8 @@ class AgentSpec:
     max_turns: int = 80
     engine: str = "api"            # "api" (Messages API, app/runs.py) or "claude_code" (app/claude_code.py)
     web_search: bool = False
+    # Internal agents (Claude Code sub-agents) by name: {"description", "prompt", "model", "effort"}.
+    subagents: dict = field(default_factory=dict)
 
     @property
     def tool_index(self) -> dict:
@@ -74,6 +76,7 @@ exits with code 3, and restores the latest snapshot if a restarted server keeps 
 - app/server.py: FastAPI app. REST API under /api, Server-Sent Events for agent runs, serves static/ at /.
 - app/db.py: SQLite schema and helpers (database file in data/).
 - app/agents.py: system prompts and tool sets of the chat, developer and project agents.
+- app/templates.py: agent templates (referred to as @slug), autocomplete vocabulary, internal agents.
 - app/runs.py: run manager and the streaming Claude tool-use loop for the API engine (Anthropic Python SDK).
 - app/claude_code.py: the Claude Code engine (Claude Agent SDK, uses the Claude Code login on this machine).
 - app/tools.py: tool definitions and executors (file tools, shell, task updates, restart).
@@ -82,7 +85,8 @@ exits with code 3, and restores the latest snapshot if a restarted server keeps 
 - static/: single-page frontend in plain JavaScript ES modules, no build step. index.html (shell and \
 sidebar), style.css (all styles, light/dark tokens), js/main.js (hash router, server health polling), \
 js/core.js (API client, DOM helper h(), dialogs, Markdown), js/pages.js (every page), \
-js/conversation.js (live agent conversation view over SSE), js/files.js (file explorer).
+js/conversation.js (live agent conversation view over SSE), js/files.js (file explorer), \
+js/templates.js (agent templates page, autocomplete and chip inputs).
 - The server listens on port {PORT}. Health check: `curl -s localhost:{PORT}/api/health`.
 
 How to work:
@@ -116,10 +120,23 @@ def dev_spec() -> AgentSpec:
 
 # ---------------------------------------------------------------- project agents
 
+def template_profile(agent: dict) -> str:
+    """The profile an agent takes from its template, or '' when it has none."""
+    template, _ = templates.resolve_agent(agent)
+    if not template:
+        return ""
+    profile = templates.profile_text(template) or "(no rules, expertise or skills defined)"
+    return f"Your profile, from the agent template {template['symbol']} ({template['name']}):\n{profile}"
+
+
 def task_system_prompt(project: dict, agent: dict) -> str:
-    role = f" Your role: {agent['role'].strip()}" if agent["role"].strip() else ""
+    template, _ = templates.resolve_agent(agent)
+    role_text = agent["role"].strip() or (template["role"] if template else "")
+    role = f" Your role: {role_text}" if role_text else ""
     instructions = agent["instructions"].strip() or "(none)"
-    return f"""You are {agent['name']}, the agent assigned to the project "{project['name']}" in Agent Group.{role}
+    profile = template_profile(agent)
+    profile = f"\n\n{profile}" if profile else ""
+    return f"""You are {agent['name']}, the agent assigned to the project "{project['name']}" in Agent Group.{role}{profile}
 
 Project description:
 {project['description'].strip() or '(none)'}
@@ -147,9 +164,13 @@ def task_spec(project: dict, task_id: int) -> AgentSpec:
     s = db.get_settings()
     agent = project["agent"]
     ws = T.Workspace(project["repo_path"], allow_commands=s["allow_commands"])
+    _, internal = templates.resolve_agent(agent)
+    subagents = {t["slug"]: {"description": t["description"] or t["role"] or t["name"],
+                             "prompt": templates.subagent_prompt(t), "model": t["model"] or None,
+                             "effort": t["effort"] or None} for t in internal}
     return AgentSpec(kind="task", model=agent["model"], effort=agent["effort"],
                      tools=T.FILE_TOOLS + T.TASK_TOOLS, workspace=ws, task_id=task_id,
-                     max_turns=s["max_agent_turns"], engine=s["engine"])
+                     max_turns=s["max_agent_turns"], engine=s["engine"], subagents=subagents)
 
 
 def task_record_text(task: dict) -> str:
@@ -171,6 +192,8 @@ def task_followup_message(task: dict, note: str, conv: dict, project: dict) -> s
     parts.append(task_record_text(task) + "\n(The user may have edited this record since your last turn.)")
     current_prompt = task_system_prompt(project, project["agent"])
     if current_prompt != conv["system_prompt"]:
-        parts.append("The project or agent settings were updated. Current agent instructions:\n"
-                     + (project["agent"]["instructions"].strip() or "(none)"))
+        profile = template_profile(project["agent"])
+        parts.append("The project or agent settings were updated. "
+                     + (f"{profile}\n\n" if profile else "")
+                     + "Current agent instructions:\n" + (project["agent"]["instructions"].strip() or "(none)"))
     return "\n\n".join(parts)

@@ -181,6 +181,7 @@ def _options(run, spec: AgentSpec, conv: dict, resume: str | None, stderr: deque
         system_prompt={"type": "preset", "preset": "claude_code",
                        "append": conv["system_prompt"] + CLAUDE_CODE_NOTES[spec.kind]},
         tools={"type": "preset", "preset": "claude_code"},
+        agents={name: sdk.AgentDefinition(**d) for name, d in spec.subagents.items()} or None,
         mcp_servers={"agent": create_sdk_mcp_server("agent", tools=_mcp_tools(run, spec))})
 
 

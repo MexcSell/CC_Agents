@@ -154,9 +154,9 @@ input[type=text], input[type=password], input[type=number], input:not([type]), s
 }
 textarea { resize: vertical; min-height: 70px; }
 input:focus, select:focus, textarea:focus { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: -1px; border-color: var(--accent); }
-label.field { display: grid; gap: 5px; font-weight: 600; font-size: 13px; align-content: start; }
-label.field input, label.field textarea, label.field select, label.field button { font-weight: 400; font-size: 14px; }
-label.field .hint { font-weight: 400; color: var(--muted); font-size: 12px; }
+.field { display: grid; gap: 5px; font-weight: 600; font-size: 13px; align-content: start; }
+.field input, .field textarea, .field select, .field button { font-weight: 400; font-size: 14px; }
+.field .hint { font-weight: 400; color: var(--muted); font-size: 12px; }
 label.check { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 label.check input { width: auto; }
 .form-grid { display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr); }
@@ -334,6 +334,35 @@ body.resizing { cursor: col-resize; user-select: none; }
 .ctx-menu button { display: flex; width: 100%; border: none; background: none; padding: 6px 10px; border-radius: 6px; justify-content: flex-start; }
 .ctx-menu button:hover { background: var(--hover); }
 .ctx-menu hr { border: none; border-top: 1px solid var(--border); margin: 4px 0; }
+
+/* ---------- agent templates, chips, autocomplete ---------- */
+.sym { font-family: var(--mono); font-size: 12px; color: var(--accent); background: var(--accent-soft); padding: 1px 6px; border-radius: 6px; margin-right: 4px; }
+.tpl-card { display: flex; flex-direction: column; gap: 8px; cursor: pointer; transition: border-color .15s; }
+.tpl-card:hover { border-color: var(--accent); }
+.tpl-row { display: grid; grid-template-columns: 70px 1fr; gap: 6px; align-items: start; font-size: 12px; }
+.tpl-row .lbl { color: var(--muted); padding-top: 2px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; border: 1px solid var(--border); border-radius: 8px; padding: 5px 6px; background: var(--panel); cursor: text; }
+.chips:focus-within { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: -1px; border-color: var(--accent); }
+.chips > input[type=text] { flex: 1 1 160px; min-width: 120px; border: none; outline: none; padding: 3px 4px; background: transparent; }
+.chips.block { flex-direction: column; align-items: stretch; }
+.chips.block > input[type=text] { flex: none; }
+.chip-list { display: contents; }
+.chips.block .chip-list { display: flex; flex-direction: column; gap: 4px; }
+.chip { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; padding: 2px 4px 2px 9px; border-radius: 99px; background: var(--panel-2); border: 1px solid var(--border); font-size: 12.5px; font-weight: 400; }
+.chip .txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chips.block .chip { border-radius: 6px; }
+.chips.block .chip .txt { white-space: normal; flex: 1; }
+.chip .x { border: none; background: none; padding: 0 4px; font-size: 11px; color: var(--muted); line-height: 1.4; border-radius: 99px; }
+.chip .x:hover { background: var(--hover); color: var(--err); }
+.chip.sm { padding: 1px 8px; font-size: 11.5px; }
+.tpl-row .chip-list { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.ac-menu { position: fixed; z-index: 70; max-width: min(560px, calc(100vw - 16px)); max-height: 280px; overflow: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow); padding: 4px; font-size: 13px; }
+.ac-item { display: flex; gap: 8px; align-items: baseline; padding: 6px 9px; border-radius: 6px; cursor: pointer; }
+.ac-item.active { background: var(--accent-soft); }
+.ac-item .v { flex: none; max-width: 100%; }
+.ac-item .l { font-weight: 600; }
+.ac-item .hint { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.ac-foot { color: var(--muted); font-size: 11px; padding: 4px 9px 2px; border-top: 1px solid var(--border); margin-top: 4px; }
 
 /* ---------- projects ---------- */
 .project-card { display: grid; gap: 10px; cursor: pointer; transition: border-color .15s; }
