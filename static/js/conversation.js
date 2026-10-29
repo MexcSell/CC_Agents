@@ -47,6 +47,11 @@ export function viewImage(src) {
 export function toolSummary(name, input) {
   input = input || {};
   const size = s => (typeof s === 'string' ? ` (${fmtBytes(new Blob([s]).size)})` : '');
+  // Lists in a running agent's activity are cut to 10 items plus a last string item '… N more'.
+  const list = v => (Array.isArray(v) ? v : []);
+  const objs = v => list(v).filter(x => x && typeof x === 'object');
+  const more = v => { const m = /^… (\d+) more$/.exec(list(v).at(-1)); return m ? +m[1] : 0; };
+  const count = v => list(v).length - (more(v) ? 1 : 0) + more(v);
   if (name.startsWith('mcp__agent__')) return toolSummary(name.slice('mcp__agent__'.length), input);
   switch (name) {
     // Claude Code engine tools
@@ -59,7 +64,7 @@ export function toolSummary(name, input) {
     case 'Grep': return `/${input.pattern || ''}/${input.glob ? ` ${input.glob}` : ''}${input.path ? ` in ${input.path}` : ''}`;
     case 'WebSearch': return input.query || '';
     case 'WebFetch': return input.url || '';
-    case 'TodoWrite': return `${(input.todos || []).length} to-dos`;
+    case 'TodoWrite': return `${count(input.todos)} to-dos`;
     case 'Task': case 'Agent': return input.description || '';
     case 'ToolSearch': return (input.query || '').replace(/^select:/, '');
     // API engine tools
@@ -74,6 +79,15 @@ export function toolSummary(name, input) {
     case 'restart_server': return input.reason || '';
     case 'read_server_log': return `${input.lines || 120} lines`;
     case 'web_search': return input.query || '';
+    // team tools
+    case 'ask_agent': return `${input.agent || ''}: ${input.question || ''}`;
+    case 'ask_user': return `${input.question || ''}${list(input.options).length ? `  (${list(input.options).filter(o => typeof o !== 'object').join(' / ')})` : ''}`;
+    case 'delegate': return `${list(input.task_ids).map(t => (typeof t === 'number' ? `#${t}` : t)).join(' ')}${input.message ? `: ${input.message}` : ''}`;
+    case 'create_subtasks': return `${count(input.subtasks)} sub-tasks: ${objs(input.subtasks).map(s => s.title || '').join(' · ')}${more(input.subtasks) ? ' · …' : ''}`;
+    case 'review_subtask': return `#${input.task_id ?? ''} ${input.decision || ''}${input.comment ? `: ${input.comment}` : ''}`;
+    case 'record_learning': return `${input.scope || ''}: ${input.lesson || ''}`;
+    case 'add_team_member': return `${input.template || ''}${input.name ? ` as ${input.name}` : ''}`;
+    case 'post_to_discussion': return `${input.to ? `to ${input.to}: ` : ''}${input.text || ''}`;
     default: return JSON.stringify(input).slice(0, 160);
   }
 }

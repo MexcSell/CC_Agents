@@ -5,7 +5,7 @@ import {
   fmtDate, timeAgo, fmtDuration, fmtHours, statusBadge, progressBar, STATUS_LABELS, modelOptions, effortOptions, themeSwitch,
 } from './core.js';
 import { icon } from './icons.js';
-import { ConversationView, prepareImage, viewImage, IMAGE_TYPES, MAX_IMAGES } from './conversation.js';
+import { ConversationView, prepareImage, viewImage, toolSummary, IMAGE_TYPES, MAX_IMAGES } from './conversation.js';
 import { FileExplorer, pickDirectory } from './files.js';
 import { teamTab, knowledgeTab, questionsCard, discussionCard, discussionTab, deleteProject } from './team.js';
 
@@ -31,6 +31,29 @@ const refill = (pane, ...children) => {
 };
 
 // ================================================================ dashboard
+
+// Second line of a running agent on the dashboard: what it is doing right now (`activity` of /api/dashboard).
+// Questions to a teammate or the user stand out, since those are what the agent is waiting for.
+function runActivity(a) {
+  if (!a) return h('div', { class: 'run-act small muted' }, 'working…');
+  let mark = '🔧', label = '', text = '', cls = '';
+  if (a.type === 'thinking') [mark, text] = ['💭', 'thinking…'];
+  else if (a.type === 'text') [mark, text] = ['✍', a.text || 'writing…'];
+  else {
+    const name = (a.name || '').replace(/^mcp__agent__/, ''), input = a.input;
+    if (!input) [label, text] = [name, 'preparing…'];
+    else if (name === 'ask_agent') [mark, label, text, cls] = ['❓', `asks ${input.agent || 'a teammate'}:`, input.question || '', 'inquiry'];
+    else if (name === 'ask_user') [mark, label, text, cls] = ['❓', 'asks you:', toolSummary(name, input), 'inquiry'];
+    else if (name === 'Bash' || name === 'run_command') [mark, text, cls] = ['', toolSummary(name, input), 'cmd'];
+    else if (name === 'WebSearch' || name === 'web_search') [mark, text] = ['🔎', toolSummary(name, input)];
+    else [label, text] = [name, toolSummary(a.name, input)];
+  }
+  const since = a.since ? fmtDuration(Math.max(0, Date.now() / 1000 - a.since)) : '';
+  return h('div', { class: `run-act small ${cls}`, title: [mark, label, text].filter(Boolean).join(' ') + (since ? `\n${since}` : '') },
+    mark ? h('span', { class: 'run-act-mark' }, mark) : null,
+    h('span', { class: 'run-act-text' }, label ? h('b', {}, label, ' ') : null, text),
+    since ? h('span', { class: 'run-act-since muted' }, since) : null);
+}
 
 export async function dashboardPage(view) {
   const page = h('div', { class: 'page' });
@@ -61,8 +84,9 @@ export async function dashboardPage(view) {
       h('div', { class: 'two-col' },
         h('div', { class: 'card' }, h('h2', {}, 'Running agents'),
           d.active_runs.length
-            ? h('div', { class: 'stack', style: { gap: '8px' } }, d.active_runs.map(r => h('a', { href: `#/c/${r.conversation_id}`, class: 'row' },
-              runDot(), h('span', { class: 'badge' }, r.kind), h('span', { class: 'grow ellipsis' }, r.title), h('span', { class: 'small muted' }, fmtDuration(Date.now() / 1000 - r.started)))))
+            ? h('div', { class: 'stack', style: { gap: '8px' } }, d.active_runs.map(r => h('a', { href: `#/c/${r.conversation_id}`, class: 'run-item' },
+              h('div', { class: 'row' }, runDot(), h('span', { class: 'badge' }, r.kind), h('span', { class: 'grow ellipsis' }, r.title), h('span', { class: 'small muted' }, fmtDuration(Date.now() / 1000 - r.started))),
+              runActivity(r.activity))))
             : h('div', { class: 'muted' }, 'No agents are running right now.')),
         h('div', { class: 'card' }, h('h2', {}, 'Recently updated tasks'),
           d.recent_tasks.length
@@ -633,6 +657,9 @@ async function projectPage(view, [pidParam, tab = 'tasks', taskParam], query = n
     await knowledgeTab(body, project);
     return;
   }
+  if (tab === 'discussion') {
+    return discussionTab(body, project, { imagesInput: text => taskImagesInput(text, null, { per: 'message', onto: 'the message' }), onChanged: changed });
+  }
   // The setup agent changes the team and the brief: reload the project in place (tasksTab holds it).
   const reloadProject = async () => {
     Object.assign(project, await api('GET', `/api/projects/${pid}`, undefined, { quiet: true }));
@@ -657,9 +684,6 @@ function devSwitch(active) {
 
 const taskImageUrl = (taskId, name) => `/api/tasks/${taskId}/images/${enc(name)}`;
 
-  if (tab === 'discussion') {
-    return discussionTab(body, project, { imagesInput: text => taskImagesInput(text, null, { per: 'message', onto: 'the message' }), onChanged: changed });
-  }
 /**
  * Images of a task description: 📎 button, or paste / drop images onto the description textarea.
  * With a task, its stored images are shown too and can be removed. `per` and `onto` word the limit and the hint.
@@ -720,6 +744,12 @@ function taskImagesInput(textarea, task = null, { per = 'task', onto = 'the desc
       tray),
     added: async () => { await pending; return [...added]; },
     removed: async () => { await pending; return [...removed]; },
+    clear: only => {
+      if (!only) added.length = 0;
+      for (const src of only || []) { const i = added.indexOf(src); if (i >= 0) added.splice(i, 1); }
+      removed.clear();
+      render();
+    },
   };
 }
 
@@ -744,12 +774,6 @@ function newTaskModal(project, onCreated) {
         const added = await images.added();
         if (!title.value.trim() && !desc.value.trim()) { toast('Enter a title or a description.', 'error'); return false; }
         try {
-    clear: only => {
-      if (!only) added.length = 0;
-      for (const src of only || []) { const i = added.indexOf(src); if (i >= 0) added.splice(i, 1); }
-      removed.clear();
-      render();
-    },
           const task = await api('POST', `/api/projects/${project.id}/tasks`, {
             title: title.value, description: desc.value, images: added,
             estimated_hours: est.value === '' ? null : +est.value,

@@ -129,7 +129,7 @@ def dashboard():
         "conversations": db.one("SELECT COUNT(*) n FROM conversations WHERE kind = 'chat'")["n"],
         "projects": db.one("SELECT COUNT(*) n FROM projects")["n"],
         "tasks": by_status,
-        "active_runs": runs.active_runs(),
+        "active_runs": runs.active_runs(activity=True),
         "recent_tasks": db.query(
             "SELECT t.id, t.title, t.status, t.progress, t.updated_at, p.name AS project, p.id AS project_id "
             "FROM tasks t JOIN projects p ON p.id = t.project_id ORDER BY t.updated_at DESC LIMIT 8"),

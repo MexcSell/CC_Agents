@@ -23,6 +23,10 @@ log = logging.getLogger("agent_group.runs")
 
 MAX_TOKENS = 64000
 UI_PREVIEW_CHARS = 4000
+ACTIVITY_CHARS = 300          # per string in the dashboard's activity
+ACTIVITY_INPUT_CHARS = 1500   # whole tool input in the dashboard's activity (about)
+ACTIVITY_LIST_ITEMS = 10      # per list in the dashboard's activity
+TIMED_EVENTS = {"turn_start", "message_start", "block_start", "tool_start"}   # these carry a `ts`
 
 
 class RunBusy(Exception):
@@ -55,6 +59,8 @@ class Run:
         with self.lock:
             data["type"] = type_
             data["seq"] = len(self.events)
+            if type_ in TIMED_EVENTS:
+                data["ts"] = time.time()
             self.events.append(data)
 
     def persisted(self) -> None:
@@ -66,6 +72,84 @@ class Run:
             return {"id": self.id, "conversation_id": self.conv_id, "kind": self.kind, "title": self.title,
                     "task_id": self.task_id, "status": self.status, "started": self.started,
                     "finished": self.finished, "resume_from": self.resume_from, "event_count": len(self.events)}
+
+    def activity(self) -> dict | None:
+        """What the agent is doing right now (for the dashboard): the latest open tool call, else the
+        block being written in the current turn, else None.
+
+        Scans back to the current turn's start only: both engines run tools between a response and
+        the next one, so a tool still open before the latest turn_start is stale.
+        """
+        with self.lock:
+            closed, started, texts, block, turn_over = set(), set(), [], None, False
+            for e in reversed(self.events):
+                t = e["type"]
+                if t == "tool_result":
+                    closed.add(e["tool_use_id"])
+                elif t == "tool_start":
+                    if e["id"] not in closed:
+                        return {"type": "tool", "name": e["name"], "input": _activity_input(e.get("input")),
+                                "since": e.get("ts")}
+                    started.add(e["id"])
+                elif t in ("turn_start", "message_start"):
+                    break
+                elif block or turn_over:
+                    continue
+                elif t in ("turn_end", "turn_discarded"):
+                    turn_over = True
+                elif t == "block_start":
+                    block = e
+                elif t == "text":
+                    texts.append(e)
+        if not block:
+            return None
+        kind, since = block["block_type"], block.get("ts")
+        if kind in ("tool_use", "server_tool_use"):
+            if block.get("id") in started:
+                return None
+            return {"type": "tool", "name": block.get("name", ""), "input": None, "since": since}
+        if kind == "text":
+            text = "".join(e["text"] for e in reversed(texts) if e["index"] == block["index"])
+            return {"type": "text", "text": text.strip()[-ACTIVITY_CHARS:].strip(), "since": since}
+        if kind in ("thinking", "redacted_thinking"):
+            return {"type": "thinking", "since": since}
+        return None
+
+
+def _activity_input(args) -> dict | None:
+    """A tool input trimmed for the dashboard, keeping its types: strings to ACTIVITY_CHARS + '…',
+    lists to ACTIVITY_LIST_ITEMS items (then a string item '… N more'), and once about
+    ACTIVITY_INPUT_CHARS are used, further list items / dict fields dropped the same way."""
+    return _trim(args, [ACTIVITY_INPUT_CHARS]) if isinstance(args, dict) else None
+
+
+def _trim(v, budget: list[int]):
+    """Trim v recursively; budget[0] is the number of characters left for the whole input."""
+    if isinstance(v, str):
+        v = v[:ACTIVITY_CHARS] + "…" if len(v) > ACTIVITY_CHARS else v
+        budget[0] -= len(v) + 2
+        return v
+    if isinstance(v, list):
+        out = []
+        for item in v[:ACTIVITY_LIST_ITEMS]:
+            if budget[0] <= 0:
+                break
+            out.append(_trim(item, budget))
+        if len(v) > len(out):
+            out.append(f"… {len(v) - len(out)} more")
+        return out
+    if isinstance(v, dict):
+        out = {}
+        for k, x in v.items():
+            if budget[0] <= 0:
+                out["…"] = f"{len(v) - len(out)} more fields"
+                break
+            k = str(k)[:ACTIVITY_CHARS]
+            budget[0] -= len(k) + 4
+            out[k] = _trim(x, budget)
+        return out
+    budget[0] -= len(json.dumps(v, default=str))
+    return v
 
 
 _runs: dict[str, Run] = {}
@@ -82,8 +166,19 @@ def active_for(conv_id: int) -> Run | None:
     return run if run and not run.done else None
 
 
-def active_runs() -> list[dict]:
-    return [r.info() for r in list(_runs.values()) if not r.done]
+def active_runs(activity: bool = False) -> list[dict]:
+    """Running runs' info; with activity=True each also gets `activity` (see Run.activity)."""
+    return [{**r.info(), "activity": _safe_activity(r)} if activity else r.info()
+            for r in list(_runs.values()) if not r.done]
+
+
+def _safe_activity(run: Run) -> dict | None:
+    """Run.activity(), but odd tool input (e.g. nesting deep enough for RecursionError) must not break the dashboard."""
+    try:
+        return run.activity()
+    except Exception:
+        log.exception("activity of run %s", run.id)
+        return None
 
 
 def recent_runs() -> list[dict]:
