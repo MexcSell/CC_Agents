@@ -535,7 +535,7 @@ export async function projectsPage(view, _params, query) {
   }
 }
 
-export async function projectPage(view, [pidParam, tab = 'tasks', taskParam], loaded = null) {
+export async function projectPage(view, [pidParam, tab = 'tasks', taskParam], query = null, loaded = null) {
   const pid = +pidParam;
   if (tab === 'agent') tab = 'team';
   let project = loaded || await api('GET', `/api/projects/${pid}`);
@@ -604,7 +604,7 @@ export async function devTeamPage(view, [tab = 'tasks', taskParam]) {
   const { project, default_group: defaultGroup } = await api('GET', '/api/devteam');
   if (state.info) state.info.dev_project_id = project?.id ?? null;
   if (project) {
-    const res = await projectPage(view, [String(project.id), tab, taskParam], project);
+    const res = await projectPage(view, [String(project.id), tab, taskParam], null, project);
     const next = typeof res === 'function' ? { dispose: res } : { ...res };
     return { ...next, update: next.update ? ([t = 'tasks', task]) => next.update([String(project.id), t, task]) : null };
   }
