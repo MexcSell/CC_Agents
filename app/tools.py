@@ -129,20 +129,30 @@ TEAM_TOOLS = [
 LEAD_TOOLS = [
     _tool("create_subtasks",
           "Break your task down: create sub-tasks and assign each to a member of your team below you (see the "
-          "team list). Give each a description with acceptance criteria. Returns the sub-task ids; run them with "
-          "delegate.",
+          "team list). Give each a description with acceptance criteria. depends_on fixes the execution order; "
+          "files lets delegate keep parallel work from editing the same files, so list them for every sub-task "
+          "that changes code. One member can take several sub-tasks; they run as separate instances of it. "
+          "Returns the sub-task ids; run them with delegate.",
           {"subtasks": {"type": "array", "items": {
               "type": "object",
               "properties": {"title": {"type": "string"},
                              "description": {"type": "string", "description": "What to do and the acceptance criteria."},
                              "assignee": {"type": "string", "description": "Key (or name) of the team member."},
-                             "estimated_hours": {"type": "number"}},
+                             "estimated_hours": {"type": "number"},
+                             "depends_on": {"type": "array", "items": {"type": ["integer", "string"]},
+                                            "description": "Sub-tasks that must finish before this one starts: ids "
+                                                           "of existing sub-tasks of your task, or exact titles of "
+                                                           "earlier items in this call."},
+                             "files": {"type": "array", "items": {"type": "string"},
+                                       "description": "Repository-relative files, folders or glob patterns this "
+                                                      "sub-task creates or changes."}},
               "required": ["title", "description", "assignee"]}}},
           ["subtasks"]),
     _tool("delegate",
-          "Have the assignees work on sub-tasks and wait for their reports. Sub-tasks given together run in "
-          "parallel, so only combine independent sub-tasks that do not edit the same files; run dependent ones "
-          "one after the other. Call it again with a message to request changes, give feedback or pass on an answer.",
+          "Have the assignees work on sub-tasks and wait for their reports. Give the whole set in one call: "
+          "independent sub-tasks run in parallel; a sub-task starts only after its depends_on have finished and "
+          "while no running sub-task shares its files. Call it again with a message to request changes, give "
+          "feedback or pass on an answer.",
           {"task_ids": {"type": "array", "items": {"type": "integer"}},
            "message": {"type": "string", "description": "Instructions, feedback or answers for the assignees. "
                                                         "Optional the first time."}},
@@ -152,7 +162,12 @@ LEAD_TOOLS = [
           "changes (revise; then delegate it again with your feedback), mark it blocked, or cancel it.",
           {"task_id": {"type": "integer"},
            "decision": {"type": "string", "enum": ["accept", "revise", "block", "cancel"]},
-           "comment": {"type": "string", "description": "Reasoning or feedback for the assignee."}},
+           "comment": {"type": "string", "description": "Reasoning or feedback for the assignee."},
+           "lesson": {"type": "string", "description": "Optional reusable lesson for the assignee from this review "
+                                                       "(a convention, a pitfall), recorded as its learning."},
+           "lesson_scope": {"type": "string", "enum": ["self", "team", "role"],
+                            "description": "self (default): the assignee's own lesson. team: for the whole project "
+                                           "team. role: for every agent with the assignee's template."}},
           ["task_id", "decision"]),
 ]
 
@@ -277,7 +292,9 @@ def validate(tool_def: dict, args) -> str | None:
     return _check_object(tool_def["input_schema"], args, "")
 
 
-def _is(value, type_: str) -> bool:
+def _is(value, type_: str | list) -> bool:
+    if isinstance(type_, list):   # one of several types, e.g. ["integer", "string"]
+        return any(_is(value, t) for t in type_)
     if isinstance(value, bool) and type_ in ("integer", "number"):
         return False
     return isinstance(value, _TYPES[type_])
@@ -300,7 +317,8 @@ def _check_object(schema: dict, args, where: str) -> str | None:
             items = spec.get("items", {"type": "string"})
             for i, v in enumerate(value):
                 if not _is(v, items["type"]):
-                    return f"field '{name}' must be an array of {items['type']}s"
+                    kinds = items["type"] if isinstance(items["type"], list) else [items["type"]]
+                    return f"field '{name}' must be an array of {' or '.join(k + 's' for k in kinds)}"
                 if items["type"] == "object":
                     problem = _check_object(items, v, f"{name}[{i}].")
                     if problem:

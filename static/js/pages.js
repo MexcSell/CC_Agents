@@ -912,6 +912,19 @@ function setupPanel(el, project, { onRunState }) {
   };
 }
 
+/** A sub-task row's muted line: assignee, its instance when the agent runs several tasks at once, order and files. */
+function subtaskMeta(x) {
+  const files = x.files || [];
+  const parts = [`🤖 ${x.assignee?.name || '—'}`, x.instances > 1 ? `instance ${x.instance}/${x.instances}` : '',
+    x.subtask_count ? `🗂 ${x.subtasks_done}/${x.subtask_count}` : '', x.open_questions ? `❓ ${x.open_questions}` : '',
+    x.depends_on?.length ? `⛓ after ${x.depends_on.map(d => `#${d}`).join(', ')}` : '',
+    files.length ? `📄 ${files.length} file${files.length === 1 ? '' : 's'}` : ''].filter(Boolean);
+  const text = parts.join(' · ');
+  // Each part stays on one line; the line wraps between parts.
+  return h('span', { class: 'small muted subtask-meta', title: files.length ? `${text}\n${files.join('\n')}` : text },
+    parts.map((p, i) => [i ? ' · ' : '', h('span', {}, p)]));
+}
+
 class TaskDetail {
   constructor(el, project, taskId, callbacks) {
     this.el = el;
@@ -1028,6 +1041,7 @@ class TaskDetail {
       h('div', { class: 'row wrap' },
         t.running ? h('span', { class: 'badge accent' }, runDot(), 'agent working') : null,
         t.team_running ? h('span', { class: 'badge accent' }, runDot(), `${t.team_running} teammate${t.team_running === 1 ? '' : 's'} working`) : null,
+        t.instances > 1 ? h('span', { class: 'badge', title: `${t.instances} tasks of this agent are running at once, each as its own instance` }, `🤖 ${t.assignee?.name || 'Agent'} · instance ${t.instance} of ${t.instances}`) : null,
         h('div', { class: 'grow' }),
         assignee,
         statusBadge(t.status),
@@ -1038,13 +1052,17 @@ class TaskDetail {
         metric('Progress', h('div', { class: 'row' }, progress, h('span', { class: 'muted' }, '%')), progressBar(t.progress, t.status === 'done')),
         metric('Estimated total time', h('div', { class: 'row' }, estimate, h('span', { class: 'muted' }, 'h')), h('span', { class: 'small muted' }, t.estimated_hours != null ? `≈ ${fmtHours(t.estimated_hours)}` : 'not estimated yet')),
         metric('Agent time spent', h('span', { class: 'val' }, fmtDuration(t.time_spent_seconds)), h('span', { class: 'small muted' }, `updated ${timeAgo(t.updated_at)}`))),
+      t.depends_on?.length || t.files?.length ? h('div', { class: 'card pad-sm task-plan small' },
+        t.depends_on?.length ? h('div', {}, '⛓ Runs after ', t.depends_on.map((d, i) => [i ? ', ' : '', h('a', { href: `${projectBase(pid)}/tasks/${d}` }, `#${d}`)])) : null,
+        t.files?.length ? h('div', { class: 'task-files' }, '📄 Changes: ', t.files.map(f => h('code', { title: f }, f))) : null) : null,
       questionsCard(t.questions || [], { currentTask: t.id, projectId: pid, onChange: () => this.reload() }),
       t.summary ? h('div', { class: 'card pad-sm' }, h('div', { class: 'small muted', style: { fontWeight: 600, marginBottom: '4px' } }, 'STATUS SUMMARY'), md(t.summary)) : null,
       t.subtasks?.length ? h('div', { class: 'card pad-sm' },
         h('h3', {}, `🗂 Sub-tasks (${t.subtasks.filter(x => x.status === 'done').length}/${t.subtasks.length} done)`),
         h('div', { class: 'subtasks' }, t.subtasks.map(x => h('a', { class: 'subtask', href: `${projectBase(pid)}/tasks/${x.id}` },
-          h('span', { class: 'row', style: { gap: '6px', minWidth: 0 } }, x.running || x.team_running ? runDot() : null, h('b', { class: 'ellipsis' }, `#${x.id} ${x.title}`)),
-          h('span', { class: 'small muted ellipsis' }, `🤖 ${x.assignee?.name || '—'}`, x.subtask_count ? ` · 🗂 ${x.subtasks_done}/${x.subtask_count}` : '', x.open_questions ? ` · ❓ ${x.open_questions}` : ''),
+          h('span', { class: 'subtask-main' },
+            h('span', { class: 'row', style: { gap: '6px', minWidth: 0 } }, x.running || x.team_running ? runDot() : null, h('b', { class: 'ellipsis' }, `#${x.id} ${x.title}`)),
+            subtaskMeta(x)),
           statusBadge(x.status),
           progressBar(x.progress, x.status === 'done'))))) : null,
       h('details', { class: 'card pad-sm', open: !t.summary || undefined },

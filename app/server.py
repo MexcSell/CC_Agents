@@ -1024,7 +1024,18 @@ def _subtree(tid: int) -> list[int]:
                                       "JOIN sub ON t.parent_id = sub.id) SELECT id FROM sub", (tid,))]
 
 
-def _with_runtime(task: dict, running: set[int] | None = None, names: dict | None = None) -> dict:
+def _running_by_agent(running: set[int]) -> dict:
+    """Running task ids by assignee id, ascending: the parallel instances of each agent."""
+    out: dict = {}
+    if running:
+        marks = ",".join("?" * len(running))
+        for r in db.query(f"SELECT id, assignee_id FROM tasks WHERE id IN ({marks}) ORDER BY id", tuple(running)):
+            out.setdefault(r["assignee_id"], []).append(r["id"])
+    return out
+
+
+def _with_runtime(task: dict, running: set[int] | None = None, names: dict | None = None,
+                  peers: dict | None = None) -> dict:
     running = _running_task_ids() if running is None else running
     conv = team.task_conversation(task["id"])
     task["conversation_id"] = conv["id"] if conv else None
@@ -1043,6 +1054,11 @@ def _with_runtime(task: dict, running: set[int] | None = None, names: dict | Non
                                               (task["project_id"],))}
     who = names.get(task["assignee_id"])
     task["assignee"] = {"id": who["id"], "name": who["name"], "key": who["key"]} if who else None
+    # Several tasks of one agent run at once as separate instances of it
+    mine = (_running_by_agent(running) if peers is None else peers).get(task["assignee_id"], []) \
+        if task["id"] in running else []
+    task["instances"] = len(mine) if task["id"] in mine else 0
+    task["instance"] = mine.index(task["id"]) + 1 if task["id"] in mine else None
     return task
 
 
@@ -1052,7 +1068,8 @@ def list_tasks(pid: int, all: bool = False):
     _project_or_404(pid)
     running = _running_task_ids()
     names = {a["id"]: a for a in db.query("SELECT id, name, key FROM agents WHERE project_id = ?", (pid,))}
-    return [_with_runtime(t, running, names) for t in db.list_tasks(pid) if all or not t["parent_id"]]
+    peers = _running_by_agent(running)
+    return [_with_runtime(t, running, names, peers) for t in db.list_tasks(pid) if all or not t["parent_id"]]
 
 
 def _check_assignee(pid: int, aid: int | None) -> int:
@@ -1085,11 +1102,13 @@ def create_task(pid: int, body: TaskIn):
 
 @app.get("/api/tasks/{tid}")
 def get_task(tid: int):
-    task = _with_runtime(_task_or_404(tid))
-    task["events"] = db.query("SELECT * FROM task_events WHERE task_id = ? ORDER BY id DESC LIMIT 200", (tid,))
+    task = _task_or_404(tid)
     running = _running_task_ids()
     names = {a["id"]: a for a in db.query("SELECT id, name, key FROM agents WHERE project_id = ?", (task["project_id"],))}
-    task["subtasks"] = [_with_runtime(db.get_task(r["id"]), running, names)
+    peers = _running_by_agent(running)
+    task = _with_runtime(task, running, names, peers)
+    task["events"] = db.query("SELECT * FROM task_events WHERE task_id = ? ORDER BY id DESC LIMIT 200", (tid,))
+    task["subtasks"] = [_with_runtime(db.get_task(r["id"]), running, names, peers)
                         for r in db.query("SELECT id FROM tasks WHERE parent_id = ? ORDER BY id", (tid,))]
     parent = db.get_task(task["parent_id"]) if task["parent_id"] else None
     task["parent"] = {"id": parent["id"], "title": parent["title"]} if parent else None

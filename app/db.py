@@ -65,6 +65,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     parent_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
     assignee_id INTEGER,
     images TEXT NOT NULL DEFAULT '[]',
+    depends_on TEXT NOT NULL DEFAULT '[]',
+    files TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -195,6 +197,10 @@ with _lock:
         _conn.execute("ALTER TABLE tasks ADD COLUMN assignee_id INTEGER")
     if "images" not in task_cols:   # JSON list of {name, media_type}: images of the description (app/images.py)
         _conn.execute("ALTER TABLE tasks ADD COLUMN images TEXT NOT NULL DEFAULT '[]'")
+    if "depends_on" not in task_cols:   # JSON list of sub-task ids that must finish first (team.delegate)
+        _conn.execute("ALTER TABLE tasks ADD COLUMN depends_on TEXT NOT NULL DEFAULT '[]'")
+    if "files" not in task_cols:   # JSON list of files, folders or globs the sub-task changes (team.delegate)
+        _conn.execute("ALTER TABLE tasks ADD COLUMN files TEXT NOT NULL DEFAULT '[]'")
     # Projects used to have exactly one agent (UNIQUE project_id). Rebuild the table as a team table;
     # each existing agent becomes its project's lead.
     if any(ix["unique"] and ix["origin"] == "u" for ix in _conn.execute("PRAGMA index_list(agents)")):
@@ -358,7 +364,7 @@ def update_conversation_options(cid: int, patch: dict) -> dict:
 
 def _task_row(row: dict | None) -> dict | None:
     if row:
-        for key in ("insights", "next_actions", "images"):
+        for key in ("insights", "next_actions", "images", "depends_on", "files"):
             row[key] = json.loads(row[key])
     return row
 

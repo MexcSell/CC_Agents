@@ -7,6 +7,7 @@ conversation's prefix (that would invalidate its thinking blocks and prompt cach
 they reach the agent through the next user message instead.
 """
 
+import json
 from dataclasses import dataclass, field
 
 from . import db, devteam, maintenance, team, templates, tools as T
@@ -166,10 +167,15 @@ fitting template with list_templates and add it below you with add_team_member; 
 - Break the work into sub-tasks sized for one agent, with a clear description and acceptance criteria, and \
 assign each to the best-suited member below you with create_subtasks. Use the specialists: developers \
 build, QA tests, reviewers review, and so on. Small coordinating work you may do yourself.
-- Run them with delegate. Sub-tasks in one delegate call run in parallel: combine only independent \
-sub-tasks that do not edit the same files, and run dependent ones in order.
+- Fix the execution order on create_subtasks: depends_on for sub-tasks that need another's result, files \
+for every sub-task that changes code. Then delegate the whole set in one call: it runs independent sub-tasks \
+in parallel and dependent or file-sharing ones in order.
+- One member can take several sub-tasks at once (each runs as a separate instance of it), so split \
+parallelizable work (e.g. several backend parts) into sub-tasks for the same member instead of adding a \
+duplicate member.
 - Review every report: read the changes and run the tests. Accept good work with review_subtask; \
-otherwise send it back (review_subtask "revise") and delegate it again with specific feedback.
+otherwise send it back (review_subtask "revise") and delegate it again with specific feedback. Pass \
+reusable lessons on to the assignee with review_subtask's lesson.
 - Pass questions from your team to the user only when nobody on the team can answer them.
 - Keep your task record current (progress, insights, next actions). When all sub-tasks are accepted and the \
 result is verified, set status "done", progress 100 and a summary, and end your turn with a short report."""
@@ -181,7 +187,8 @@ your plan as next_actions.
 - Work autonomously; routine steps do not need permission. Keep the task record current: raise progress \
 as milestones complete, add insights when an idea, discovery or risk emerges, and keep next_actions current.
 - Stay within your task. Teammates work in the same repository at the same time; do not change files that \
-belong to someone else's task without agreeing on it first (ask_agent).
+belong to someone else's task without agreeing on it first (ask_agent). Other instances of you may work on \
+sibling sub-tasks at the same time; stay within your sub-task's files.
 - When you are done, verify your work (build, tests), then call update_task with progress 100, a summary \
 and status "review" if a teammate assigned the task (they accept it) or "done" if the user did. End your \
 turn with a short report: what you did, how you verified it, anything open."""
@@ -199,7 +206,8 @@ Learning and growth:
 - Whenever you learn something reusable (a convention of this repository, a pitfall and how to avoid it, a \
 technique that worked, feedback from the user or a reviewer), record it with record_learning: scope "self" \
 for yourself, "team" for the whole project team, "role" for general know-how useful to every agent with your \
-template. Before finishing a task, take a moment to record what you learned."""
+template. When a teammate's answer or review teaches you something reusable, record it too. Before \
+finishing a task, take a moment to record what you learned."""
 
 
 DEV_TEAM_COMMON = f"""This project is Agent Group itself: the web application you are running inside, so \
@@ -331,12 +339,13 @@ def task_record_text(task: dict, project: dict | None = None) -> str:
             f"- estimated total time: {est}\n- summary: {task['summary'] or '(none)'}\n"
             f"- insights:\n{insights}\n- next actions:\n{actions}")
     names = {a["id"]: f"{a['name']} [{a['key']}]" for a in (project or {}).get("agents", [])}
-    subs = db.query("SELECT id, title, status, progress, assignee_id FROM tasks WHERE parent_id = ? ORDER BY id",
-                    (task["id"],))
+    subs = db.query("SELECT id, title, status, progress, assignee_id, depends_on FROM tasks WHERE parent_id = ? "
+                    "ORDER BY id", (task["id"],))
     if subs:
+        after = {t["id"]: ", ".join(f"#{d}" for d in json.loads(t["depends_on"])) for t in subs}
         text += "\n- sub-tasks:\n" + "\n".join(
             f"  - #{t['id']} [{t['status']}, {t['progress']}%] {t['title']} → {names.get(t['assignee_id'], '?')}"
-            for t in subs)
+            + (f" (after {after[t['id']]})" if after[t["id"]] else "") for t in subs)
     questions = db.query("SELECT agent_name, question, answer, status FROM questions WHERE task_id = ? "
                          "ORDER BY id DESC LIMIT 6", (task["id"],))
     if questions:
@@ -356,6 +365,11 @@ def task_kickoff_message(project: dict, agent: dict, task: dict, note: str, imag
         if parent:
             parts.append(f"This is a sub-task of #{parent['id']} \"{parent['title']}\":\n"
                          f"{parent['description'].strip() or '(no description)'}")
+        if task.get("files"):
+            parts.append("Files this sub-task changes: " + ", ".join(task["files"]))
+        if task.get("depends_on"):
+            deps = [db.get_task(d) for d in task["depends_on"]]
+            parts.append("Runs after: " + ", ".join(f"#{d['id']} \"{d['title']}\"" for d in deps if d))
     parts.append(task_record_text(task, project))
     lessons = team.learnings_text(agent)
     if lessons:
