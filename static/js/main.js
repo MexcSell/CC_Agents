@@ -2,6 +2,7 @@
 
 import { api, h, fill, state, banner, resizer } from './core.js';
 import * as pages from './pages.js';
+import { initUsage, setUsageScope } from './usage.js';
 
 const routes = [
   [/^#?\/?$/, pages.dashboardPage, 'dashboard'],
@@ -37,6 +38,7 @@ async function route() {
   const query = new URLSearchParams(qs || '');
   const mine = ++token;
   document.querySelectorAll('#sidebar a.nav').forEach(a => a.classList.toggle('active', a.dataset.nav === nav));
+  setUsageScope(nav === 'dev' ? { scope: 'dev' } : nav === 'projects' ? { scope: 'project', project_id: params[0] ? +params[0] : null } : { scope: 'chat' });
 
   // Selecting something inside the page on screen (a conversation, a session, a task) updates it in place.
   if (!force && current?.page === page && current.update) {
@@ -130,6 +132,7 @@ async function init() {
   } catch { /* the poller reports it */ }
   const sidebar = document.getElementById('sidebar');
   sidebar.after(resizer(sidebar, { key: 'sidebar', width: 208, min: 160, max: 360, collapseAt: 130, collapsed: 60, flex: document.getElementById('view') }));
+  initUsage();
   window.addEventListener('hashchange', route);
   window.addEventListener('beforeunload', e => {
     if (state.dirty.size) { e.preventDefault(); e.returnValue = ''; }

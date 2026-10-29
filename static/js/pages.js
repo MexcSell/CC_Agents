@@ -16,8 +16,8 @@ const newBtn = (title, onclick) => h('button', { class: 'sm primary', title, onc
 // Explanatory note under a pane heading: one truncated line until clicked. Expanded notes (keyed by text)
 // stay open across list re-renders until the page reloads.
 const openNotes = new Set();
-const paneNote = text => h('details', {
-  class: 'small muted pane-note', open: openNotes.has(text),
+const paneNote = (text, cls = '') => h('details', {
+  class: `small muted pane-note ${cls}`, open: openNotes.has(text),
   ontoggle: e => e.target.open ? openNotes.add(text) : openNotes.delete(text),
 }, h('summary', { title: 'Show / hide' }, text));
 // Re-render a list pane, keeping the scroll position of its .pane-body.
@@ -250,7 +250,7 @@ export async function chatPage(view, params) {
     let loading;
     if (cv) loading = cv.switchTo(convOpts());
     else {
-      cv = new ConversationView(mainPane, { ...convOpts(), headerActions: convActions, onRunState: () => loadConvs() });
+      cv = new ConversationView(mainPane, { ...convOpts(), copyParagraphs: true, headerActions: convActions, onRunState: () => loadConvs() });
       loading = cv.load();
     }
     await Promise.all([loading, loadConvs()]);
@@ -329,6 +329,7 @@ export async function devPage(view, [convParam]) {
   const cv = new ConversationView(mainPane, {
     ...convOpts(),
     agentName: 'Developer agent',
+    copyParagraphs: true,
     headerActions: [renameBtn],
     placeholder: 'Describe a change to this website… (Enter to send)',
     emptyText: 'Ask for a change to this website, e.g. "Add a light/dark theme switch to the sidebar" or "Show each project\'s total estimated hours on the dashboard".',
@@ -394,7 +395,7 @@ async function renderServerPanel(pane) {
           h('a', { class: 'btn', href: `#/files?path=${enc(info.app_root)}` }, '🗂 Source'))),
       h('div', { class: 'side-section' },
         h('div', { class: 'row' }, h('h3', { class: 'grow', style: { margin: 0 } }, 'Code snapshots'), h('button', { class: 'sm', onclick: snapshot }, '+ Snapshot')),
-        h('div', { class: 'small muted' }, 'Taken automatically before the Developer agent changes code. If a restart keeps crashing, the supervisor restores the latest one by itself.'),
+        paneNote('Taken automatically before the Developer agent changes code. If a restart keeps crashing, the supervisor restores the latest one by itself.', 'inline'),
         snaps.length ? h('div', {}, snaps.map(s => h('div', { class: 'snap' },
           h('span', { class: 'grow ellipsis mono', title: `${s.name} · ${fmtDate(s.created)}` }, s.name.replace('.tar.gz', '')),
           h('button', { class: 'sm', onclick: () => restore(s) }, 'Restore'),

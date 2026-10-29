@@ -1,6 +1,6 @@
 // File explorer (tree + editor) and a directory picker, both backed by /api/fs/*.
 
-import { api, h, fill, enc, toast, modal, confirmDialog, promptDialog, contextMenu, fmtBytes, state } from './core.js';
+import { api, h, fill, enc, toast, modal, confirmDialog, promptDialog, contextMenu, fmtBytes, state, resizer } from './core.js';
 
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i;
 
@@ -83,7 +83,8 @@ export class FileExplorer {
     });
     this.editor = h('div', { class: 'fx-editor' });
     this.renderEditorPlaceholder();
-    fill(this.el, h('div', { class: 'fx' }, toolbar, h('div', { class: 'fx-main' }, this.tree, this.editor)));
+    const gutter = resizer(this.tree, { key: 'fx-tree', width: 320, min: 180, max: 1200, collapseAt: 0, flex: this.editor });
+    fill(this.el, h('div', { class: 'fx' }, toolbar, h('div', { class: 'fx-main' }, this.tree, gutter, this.editor)));
   }
 
   // ------------------------------------------------------------ navigation

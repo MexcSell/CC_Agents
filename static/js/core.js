@@ -111,7 +111,8 @@ export function fill(el, ...children) {
  * to `target` (before it when side is 'left'). The width lives in the CSS variable --w on target and
  * in localStorage. Dragging below `collapseAt` snaps the column to `collapsed` px and adds the class
  * "collapsed" (icon-only view); double-click the gutter or click a `.pico` icon to expand it again.
- * `flex` is the column that gives up the space; it keeps at least 360px.
+ * `flex` is the column that gives up the space; it keeps at least 360px. Pass collapseAt: 0 for a
+ * column that can be resized but never collapsed.
  */
 export function resizer(target, { key, width, min = 180, max = 520, collapseAt = 130, collapsed = 56, side = 'right', flex }) {
   const storeKey = `col-w:${key}`;
@@ -128,14 +129,15 @@ export function resizer(target, { key, width, min = 180, max = 520, collapseAt =
   if (n >= min && n <= max) last = n;
   set(saved.startsWith('c') ? 0 : last);
 
-  const toggle = () => { set(target.classList.contains('collapsed') ? last : 0); save(); };
+  const collapsible = collapseAt > 0;
+  const toggle = () => { if (!collapsible) return; set(target.classList.contains('collapsed') ? last : 0); save(); };
   target.addEventListener('click', e => {
     if (target.classList.contains('collapsed') && e.target.closest('.pico')) toggle();
   });
 
   const gutter = h('div', {
     class: `gutter ${side}`, role: 'separator', tabindex: 0, 'aria-orientation': 'vertical',
-    title: 'Drag to resize · double-click to collapse or expand',
+    title: collapsible ? 'Drag to resize · double-click to collapse or expand' : 'Drag to resize',
     ondblclick: toggle,
     onkeydown: e => {
       const step = { ArrowLeft: -16, ArrowRight: 16 }[e.key];
@@ -193,7 +195,7 @@ export function banner(content, actions = []) {
 }
 
 /** Modal dialog. actions: [{label, kind, onClick}] - onClick may return false (or a promise of false) to keep it open. */
-export function modal({ title, body, actions = [], wide = false, dismissable = true, onClose }) {
+export function modal({ title, body, actions = [], wide = false, dismissable = true, cancelLabel = 'Cancel', onClose }) {
   const close = () => { backdrop.remove(); document.removeEventListener('keydown', onKey); onClose?.(); };
   const onKey = e => { if (e.key === 'Escape' && dismissable) close(); };
   const buttons = actions.map(a => {
@@ -206,7 +208,7 @@ export function modal({ title, body, actions = [], wide = false, dismissable = t
     };
     return b;
   });
-  if (dismissable) buttons.unshift(h('button', { onclick: close }, 'Cancel'));
+  if (dismissable) buttons.unshift(h('button', { onclick: close }, cancelLabel));
   const box = h('div', { class: `modal${wide ? ' wide' : ''}` },
     h('div', { class: 'modal-head' }, h('h2', {}, title)),
     h('div', { class: 'modal-body' }, body),

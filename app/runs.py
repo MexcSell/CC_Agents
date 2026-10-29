@@ -239,13 +239,12 @@ def _loop(run: Run, spec: AgentSpec) -> None:
             continue
 
         content = serialize_content(final.content)
+        usage = {**merge_usage({}, final.usage), "model": final.model}
         with run.lock:
-            mid = db.add_message(run.conv_id, "assistant", content)
+            mid = db.add_message(run.conv_id, "assistant", content, usage=usage)
             history.append({"role": "assistant", "content": content})
-            usage = final.usage
-            run.emit("turn_end", message_id=mid, stop_reason=final.stop_reason, model=final.model,
-                     usage={"input": usage.input_tokens, "output": usage.output_tokens,
-                            "cache_read": usage.cache_read_input_tokens or 0})
+            run.emit("turn_end", message_id=mid, stop_reason=final.stop_reason, model=final.model)
+            run.emit("usage", message_id=mid, usage=usage)
             run.persisted()
 
         for t in getattr(final, "input_transformations", None) or []:
@@ -371,6 +370,26 @@ def serialize_content(blocks) -> list[dict]:
             continue
         keep.append(b)
     return keep
+
+
+USAGE_FIELDS = {"input_tokens": "input", "output_tokens": "output",
+                "cache_read_input_tokens": "cache_read", "cache_creation_input_tokens": "cache_write"}
+
+
+def merge_usage(usage: dict, raw) -> dict:
+    """Fold an API usage object or dict into {input, output, cache_read, cache_write}.
+
+    Counts only grow while a response streams, so taking the maximum makes the result independent of
+    the order in which snapshots arrive.
+    """
+    if raw is None:
+        return usage
+    get = raw.get if isinstance(raw, dict) else lambda k: getattr(raw, k, None)
+    for src, dst in USAGE_FIELDS.items():
+        value = get(src)
+        if isinstance(value, int):
+            usage[dst] = max(usage.get(dst, 0), value)
+    return usage
 
 
 def executable_tool_uses(content: list[dict]) -> list[dict]:

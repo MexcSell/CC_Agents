@@ -76,6 +76,23 @@ export function toolSummary(name, input) {
   }
 }
 
+const fmtTokens = n => n < 1000 ? String(n) : n < 10_000 ? (n / 1000).toFixed(1) + 'k'
+  : n < 1_000_000 ? Math.round(n / 1000) + 'k' : (n / 1_000_000).toFixed(1) + 'M';
+
+/** Short label and tooltip for the summed token usage of some model requests. */
+function usageLabel(usages) {
+  const t = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
+  for (const u of usages) for (const k in t) t[k] += u[k] || 0;
+  const input = t.input + t.cache_read + t.cache_write;
+  const n = usages.length;
+  return {
+    text: `${fmtTokens(input)} in · ${fmtTokens(t.output)} out`,
+    title: `Token usage over ${n} model request${n === 1 ? '' : 's'}\n`
+      + `Input: ${input.toLocaleString()} (uncached ${t.input.toLocaleString()}, cache read ${t.cache_read.toLocaleString()}, cache write ${t.cache_write.toLocaleString()})\n`
+      + `Output: ${t.output.toLocaleString()} (includes thinking)`,
+  };
+}
+
 function resultText(content) {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) return content.map(c => c.text ?? JSON.stringify(c)).join('\n');
@@ -99,13 +116,15 @@ export class ConversationView {
     this.turnEl = null;
     this.currentBubble = null;
     this.disposed = false;
+    this.usage = new Map();   // stored message id -> token usage of the model request that produced it
     this.build();
   }
 
   build() {
     this.titleEl = h('div', { class: 'title ellipsis' }, this.opts.title || '');
     this.statusEl = h('span', { class: 'small muted' });
-    const head = h('div', { class: 'conv-head' }, this.titleEl, this.statusEl, this.opts.headerActions || []);
+    this.usageEl = h('span', { class: 'small muted usage', hidden: true });
+    const head = h('div', { class: 'conv-head' }, this.titleEl, this.usageEl, this.statusEl, this.opts.headerActions || []);
     this.inner = h('div', { class: 'conv-inner' });
     this.scroller = h('div', { class: 'conv-scroll' }, this.inner);
     this.input = h('textarea', { rows: 1, placeholder: this.opts.placeholder || 'Message Claude… (Enter to send, Shift+Enter for a new line)' });
@@ -212,6 +231,8 @@ export class ConversationView {
     fill(this.inner);
     this.currentBubble = null;
     this.turnEl = null;
+    this.usage.clear();
+    this.renderUsageTotal();
     if (!messages.length) {
       this.inner.append(h('div', { class: 'empty' }, h('div', { class: 'big' }, '💬'), this.opts.emptyText || 'No messages yet.'));
       return;
@@ -236,6 +257,7 @@ export class ConversationView {
           if (node) turn.append(node);
         }
         if (turn.childNodes.length) bubble.append(turn);
+        if (m.usage) this.addUsage(m.id, m.usage);
       }
     }
   }
@@ -260,10 +282,28 @@ export class ConversationView {
     if (this.currentBubble) return this.currentBubble;
     this.inner.querySelector(':scope > .empty')?.remove();
     const bubble = h('div', { class: 'bubble' });
+    bubble._usageEl = h('span', { class: 'usage', hidden: true });
+    bubble._usage = new Map();
     this.inner.append(h('div', { class: 'msg assistant' },
-      h('div', { class: 'who' }, this.opts.agentName || 'Claude', when ? h('span', { class: 'muted' }, '· ' + fmtDate(when)) : null), bubble));
+      h('div', { class: 'who' }, this.opts.agentName || 'Claude', when ? h('span', { class: 'muted' }, '· ' + fmtDate(when)) : null, bubble._usageEl), bubble));
     this.currentBubble = bubble;
     return bubble;
+  }
+
+  /** Token usage of one model request, shown on the reply it belongs to and in the conversation total. */
+  addUsage(messageId, usage) {
+    const bubble = this.ensureAssistantBubble();
+    bubble._usage.set(messageId, usage);
+    this.usage.set(messageId, usage);
+    const { text, title } = usageLabel([...bubble._usage.values()]);
+    Object.assign(bubble._usageEl, { textContent: text, title, hidden: false });
+    this.renderUsageTotal();
+  }
+
+  renderUsageTotal() {
+    if (!this.usage.size) { this.usageEl.hidden = true; return; }
+    const { text, title } = usageLabel([...this.usage.values()]);
+    Object.assign(this.usageEl, { textContent: 'Σ ' + text, title: title.replace('Token usage', 'Conversation token usage'), hidden: false });
   }
 
   renderBlock(b, results) {
@@ -429,6 +469,7 @@ export class ConversationView {
         if (card) this.fillToolResult(card, ev.content, ev.is_error);
         break;
       }
+      case 'usage': this.addUsage(ev.message_id, ev.usage); break;
       case 'task_update': this.opts.onTaskUpdate?.(ev.task); break;
       case 'notice': this.addNotice(ev.text, ev.level); break;
       case 'error': this.addNotice(ev.text, 'error'); break;

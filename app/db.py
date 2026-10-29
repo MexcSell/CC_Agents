@@ -95,6 +95,8 @@ with _lock:
     # Migrations for databases created by earlier versions.
     if "engine" not in {r["name"] for r in _conn.execute("PRAGMA table_info(messages)")}:
         _conn.execute("ALTER TABLE messages ADD COLUMN engine TEXT NOT NULL DEFAULT 'api'")
+    if "usage" not in {r["name"] for r in _conn.execute("PRAGMA table_info(messages)")}:
+        _conn.execute("ALTER TABLE messages ADD COLUMN usage TEXT")
 
 
 def now() -> str:
@@ -190,23 +192,30 @@ def get_conversation(cid: int) -> dict | None:
 
 
 def list_messages(cid: int) -> list[dict]:
-    rows = query("SELECT id, role, content, engine, created_at FROM messages WHERE conversation_id = ? ORDER BY id",
-                 (cid,))
+    rows = query("SELECT id, role, content, engine, usage, created_at FROM messages WHERE conversation_id = ? "
+                 "ORDER BY id", (cid,))
     for r in rows:
         r["content"] = json.loads(r["content"])
+        r["usage"] = json.loads(r["usage"]) if r["usage"] else None
     return rows
 
 
-def add_message(cid: int, role: str, content, engine: str = "api") -> int:
-    """Store a message. `engine` records which engine produced it ("api" or "claude_code")."""
+def add_message(cid: int, role: str, content, engine: str = "api", usage: dict | None = None) -> int:
+    """Store a message. `engine` records which engine produced it ("api" or "claude_code"); `usage` holds
+    the token counts of the model request that produced an assistant message."""
     ts = now()
     with transaction():
         mid = _conn.execute(
-            "INSERT INTO messages(conversation_id, role, content, engine, created_at) VALUES(?, ?, ?, ?, ?)",
-            (cid, role, json.dumps(content, ensure_ascii=False), engine, ts),
+            "INSERT INTO messages(conversation_id, role, content, engine, usage, created_at) VALUES(?, ?, ?, ?, ?, ?)",
+            (cid, role, json.dumps(content, ensure_ascii=False), engine, json.dumps(usage) if usage else None, ts),
         ).lastrowid
         _conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (ts, cid))
     return mid
+
+
+def set_message_usage(mid: int, usage: dict) -> None:
+    with transaction():
+        _conn.execute("UPDATE messages SET usage = ? WHERE id = ?", (json.dumps(usage), mid))
 
 
 def update_conversation_options(cid: int, patch: dict) -> dict:

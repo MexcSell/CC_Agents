@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Res
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import agents, db, fsops, images, maintenance, runs
+from . import agents, db, fsops, images, maintenance, runs, usage
 from .config import (ACCESS_TOKEN, APP_ROOT, EFFORTS, HOST, MODELS, PORT, RESTART_EXIT_CODE,
                      STATIC_DIR)
 
@@ -170,6 +170,15 @@ def delete_snapshot(name: str):
         not_found("Snapshot not found")
     path.unlink()
     return {"ok": True}
+
+
+@app.get("/api/usage")
+def plan_usage(model: str | None = None, scope: str | None = None, project_id: int | None = None,
+               refresh: bool = False):
+    """Claude plan limits and the tokens spent on `model` (default: the model of the agent behind `scope`)."""
+    if model and model not in MODEL_IDS:
+        raise HTTPException(400, f"Unknown model {model}")
+    return usage.report(model or usage.resolve_model(scope, project_id), force=refresh)
 
 
 # ---------------------------------------------------------------- settings

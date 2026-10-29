@@ -247,6 +247,9 @@ class _Session:
         self.started = False       # Claude Code accepted the prompt (init message seen)
         self.streamed = False      # stream events seen for the current assistant message
         self.json_bytes: dict[int, int] = {}
+        self.usage_key = None      # id of the model response whose token usage is being tracked
+        self.usage_row = None      # stored message that carries that usage
+        self.usage: dict = {}
         stderr: deque = deque(maxlen=30)
         final: ResultMessage | None = None
         try:
@@ -334,7 +337,11 @@ class _Session:
         if kind == "message_start":
             self.streamed = False
             self.json_bytes = {}
-            run.emit("turn_start", model=e.get("message", {}).get("model", self.spec.model))
+            message = e.get("message", {})
+            self.track_usage(message.get("id"), message.get("usage"), model=message.get("model"))
+            run.emit("turn_start", model=message.get("model", self.spec.model))
+        elif kind == "message_delta":
+            self.track_usage(self.usage_key, e.get("usage"))
         elif kind == "content_block_start":
             self.streamed = True
             block = e["content_block"]
@@ -366,12 +373,31 @@ class _Session:
         if not self.streamed:
             self.synthesize(blocks)
         with self.run.lock:
-            db.add_message(self.run.conv_id, "assistant", blocks, ENGINE)
+            mid = db.add_message(self.run.conv_id, "assistant", blocks, ENGINE)
             self.run.persisted()
         self.output = True
+        self.track_usage(msg.message_id, msg.usage, mid, msg.model)
         for b in blocks:
             if b["type"] == "tool_use":
                 self.run.emit("tool_start", id=b["id"], name=b["name"], input=self.runs._preview_input(b["input"]))
+
+    def track_usage(self, key, raw, row: int | None = None, model: str | None = None) -> None:
+        """Record a model response's token usage (and model) on the first stored message it produced.
+
+        Claude Code stores one response as several assistant messages (one per content block) and
+        reports usage on each of them and in the stream's message_start/message_delta events; all of
+        these are snapshots of the same counts, merged here.
+        """
+        if key is None or key != self.usage_key:
+            self.usage_key, self.usage_row, self.usage = key, None, {}
+        self.runs.merge_usage(self.usage, raw)
+        if model and self.usage:
+            self.usage["model"] = model
+        if self.usage_row is None:
+            self.usage_row = row
+        if self.usage_row is not None and self.usage:
+            db.set_message_usage(self.usage_row, self.usage)
+            self.run.emit("usage", message_id=self.usage_row, usage=dict(self.usage))
 
     def synthesize(self, blocks: list[dict]) -> None:
         """Render a message for which no stream events arrived."""
