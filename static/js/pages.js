@@ -6,7 +6,7 @@ import {
 } from './core.js';
 import { ConversationView } from './conversation.js';
 import { FileExplorer, pickDirectory } from './files.js';
-import { teamTab, knowledgeTab, questionsCard, discussionCard, groupPicker, deleteProject } from './team.js';
+import { teamTab, knowledgeTab, questionsCard, discussionCard, deleteProject } from './team.js';
 
 const runDot = () => h('span', { class: 'dot run', title: 'Agent working' });
 
@@ -465,11 +465,12 @@ export async function projectsPage(view, _params, query) {
   const page = h('div', { class: 'page' });
   view.append(page);
   const projects = await api('GET', '/api/projects');
-  const card = p => h('div', { class: 'card project-card', onclick: () => go(`#/projects/${p.id}`) },
-    h('div', { class: 'row' }, h('h2', { class: 'grow ellipsis', style: { margin: 0 } }, p.name),
+  // The built-in Developer project opens on the Developer page and cannot be deleted.
+  const card = p => h('div', { class: 'card project-card', onclick: () => go(p.system === 'dev' ? '#/dev/team' : `#/projects/${p.id}`) },
+    h('div', { class: 'row' }, h('h2', { class: 'grow ellipsis', style: { margin: 0 } }, p.system === 'dev' ? `🛠 ${p.name}` : p.name),
       p.setup?.running ? h('span', { class: 'badge accent' }, runDot(), 'setting up') : null,
       p.running ? h('span', { class: 'badge accent' }, runDot(), `${p.running} running`) : null,
-      h('button', {
+      p.system === 'dev' ? h('span', { class: 'badge', title: 'The development team of this website. Built in, cannot be deleted.' }, 'built-in') : h('button', {
         class: 'ghost icon sm danger', title: 'Delete project',
         onclick: async e => { e.stopPropagation(); if (await deleteProject(p)) go('#/projects'); },
       }, '🗑')),
@@ -569,40 +570,11 @@ function devSwitch(active) {
 }
 
 export async function devTeamPage(view, [tab = 'tasks', taskParam]) {
-  const { project, default_group: defaultGroup } = await api('GET', '/api/devteam');
-  if (state.info) state.info.dev_project_id = project?.id ?? null;
-  if (project) {
-    const res = await projectPage(view, [String(project.id), tab, taskParam], null, project);
-    const next = typeof res === 'function' ? { dispose: res } : { ...res };
-    return { ...next, update: next.update ? ([t = 'tasks', task]) => next.update([String(project.id), t, task]) : null };
-  }
-
-  // Not set up yet: choose the agent group the team is created from.
-  const [settings, groups] = await Promise.all([api('GET', '/api/settings'), api('GET', '/api/groups')]);
-  const picker = groupPicker(groups, { value: groups.some(g => g.slug === defaultGroup) ? defaultGroup : '' });
-  const model = h('select', {}, modelOptions(settings.dev_model));
-  const effort = h('select', {}, effortOptions(settings.dev_effort));
-  const create = async () => {
-    if (!picker.group()) { toast('Choose an agent group.', 'error'); return; }
-    await api('POST', '/api/devteam', { group: picker.get(), model: model.value, effort: effort.value });
-    toast('Development team created', 'ok');
-    go('#/dev/team');
-  };
-  view.append(h('div', { class: 'page', style: { maxWidth: '900px' } },
-    devSwitch('team'),
-    h('div', { class: 'page-head' }, h('h1', {}, 'Development team')),
-    h('div', { class: 'card form-grid' },
-      h('div', {}, 'A team of agents that develops and runs this website. You give its lead a task — a feature, a bug, a maintenance job — and the lead plans it, splits it between backend, frontend, QA, review and operations, integrates the results and restarts the server at the end.'),
-      h('ul', { class: 'small muted', style: { margin: 0, paddingLeft: '18px', lineHeight: 1.7 } },
-        h('li', {}, 'The team works in this site’s source folder with the Developer agent’s safeguards: a code snapshot before the first change of every task, and .venv/, data/ and .git/ protected.'),
-        h('li', {}, 'Every agent can read the server log; only the lead restarts the server, once the whole change is verified.'),
-        h('li', {}, 'Agents consult each other, ask you when only you can decide, and record lessons that make the team better over time.')),
-      field('Agent group', picker.input, groups.some(g => g.slug === defaultGroup) ? `#${defaultGroup} is made for this website. You can change the team later.` : 'The group’s members become the team. You can change the team later.'),
-      picker.preview,
-      h('div', { class: 'form-grid two' },
-        field('Default model', model, 'For agents whose template has no model of its own.'),
-        field('Default effort', effort)),
-      h('div', {}, h('button', { class: 'primary', onclick: create }, '👥 Create the development team')))));
+  const { project } = await api('GET', '/api/devteam');   // the built-in Developer project, always there
+  if (state.info) state.info.dev_project_id = project.id;
+  const res = await projectPage(view, [String(project.id), tab, taskParam], null, project);
+  const next = typeof res === 'function' ? { dispose: res } : { ...res };
+  return { ...next, update: next.update ? ([t = 'tasks', task]) => next.update([String(project.id), t, task]) : null };
 }
 
 function newTaskModal(project, onCreated) {

@@ -84,7 +84,7 @@ exits with code 3, and restores the latest snapshot if a restarted server keeps 
 - app/templates.py: agent templates (referred to as @slug), context-dependent editor suggestions, internal \
 agents; app/template_presets.py: the built-in templates (by functional area and language) and agent groups.
 - app/groups.py: agent groups (#slug), hierarchical teams of templates that become a project's agents.
-- app/devteam.py: the development team of this website (a built-in project on the Developer page).
+- app/devteam.py: the Developer project, the development team of this website (built in, listed on the Projects page, opened on the Developer page, cannot be deleted).
 - app/team.py: team work on tasks: sub-tasks, delegation, consultations, questions to the user, lessons \
 learned, the team discussion.
 - app/runs.py: run manager and the streaming Claude tool-use loop for the API engine (Anthropic Python SDK).
