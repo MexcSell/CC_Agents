@@ -1,6 +1,46 @@
 // Conversation view: renders stored messages and follows a live agent run over Server-Sent Events.
 
-import { api, h, fill, md, renderMarkdown, enhanceMarkdown, addParagraphCopy, fmtBytes, fmtDate, state, banner } from './core.js';
+import { api, h, fill, md, renderMarkdown, enhanceMarkdown, addParagraphCopy, fmtBytes, fmtDate, state, banner, toast } from './core.js';
+
+// Attached images: the types and limits app/images.py accepts.
+const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+const MAX_IMAGES = 8;
+const MAX_IMAGE_BYTES = 3_750_000;
+const MAX_IMAGE_EDGE = 2000;   // long edge of an image that has to be re-encoded to fit MAX_IMAGE_BYTES
+
+const toDataUrl = blob => new Promise((resolve, reject) => {
+  const r = new FileReader();
+  r.onload = () => resolve(r.result);
+  r.onerror = () => reject(r.error);
+  r.readAsDataURL(blob);
+});
+
+/** The image as a data: URL, downscaled and re-encoded only when it is too large to send as is. */
+async function prepareImage(file) {
+  const bitmap = await createImageBitmap(file);
+  if (file.size <= MAX_IMAGE_BYTES && Math.max(bitmap.width, bitmap.height) <= 8000) return toDataUrl(file);
+  const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(bitmap.width, bitmap.height));
+  const canvas = h('canvas', { width: Math.round(bitmap.width * scale), height: Math.round(bitmap.height * scale) });
+  const encode = (type, quality) => {
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (type === 'image/jpeg') { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height); }
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    return new Promise(resolve => canvas.toBlob(resolve, type, quality));
+  };
+  let blob = await encode(file.type === 'image/webp' ? 'image/webp' : file.type === 'image/jpeg' ? 'image/jpeg' : 'image/png', 0.9);
+  if (!blob || blob.size > MAX_IMAGE_BYTES) blob = await encode('image/jpeg', 0.85);
+  if (!blob || blob.size > MAX_IMAGE_BYTES) throw new Error('too large');
+  return toDataUrl(blob);
+}
+
+function viewImage(src) {
+  const close = () => { el.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = e => { if (e.key === 'Escape') close(); };
+  const el = h('div', { class: 'modal-backdrop lightbox', title: 'Close', onclick: close }, h('img', { src, alt: 'Attached image' }));
+  document.addEventListener('keydown', onKey);
+  document.body.append(el);
+}
 
 export function toolSummary(name, input) {
   input = input || {};
@@ -45,7 +85,7 @@ function resultText(content) {
 export class ConversationView {
   /**
    * opts: convId, title, emptyText, placeholder, sendLabel, hint, agentName,
-   *       sendFn(text) -> {run, conversation_id?}, allowEmptySend, headerActions [nodes],
+   *       sendFn(text, images) -> {run, conversation_id?}, allowEmptySend, headerActions [nodes],
    *       onTaskUpdate(task), onRunState(running), noHead,
    *       copyParagraphs (copy icon on each paragraph of the agent's replies)
    */
@@ -73,11 +113,37 @@ export class ConversationView {
       if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); this.send(); }
     });
     this.input.addEventListener('input', () => this.autosize());
+    // Pasted images are attached; any text on the clipboard is pasted as usual.
+    this.input.addEventListener('paste', e => {
+      const files = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith('image/'));
+      if (files.length) this.addImages(files);
+    });
     this.sendBtn = h('button', { class: 'primary', onclick: () => this.send() }, this.opts.sendLabel || 'Send');
     this.stopBtn = h('button', { class: 'danger', hidden: true, onclick: () => this.stop() }, '■ Stop');
+    this.attachments = [];
+    this.tray = h('div', { class: 'attachments', hidden: true });
+    const fileInput = h('input', {
+      type: 'file', accept: IMAGE_TYPES.join(','), multiple: true, hidden: true,
+      onchange: e => { this.addImages([...e.target.files]); e.target.value = ''; },
+    });
+    const attachBtn = h('button', { class: 'ghost icon attach', title: 'Attach images (you can also paste or drop them)', onclick: () => fileInput.click() }, '📎');
     const composer = h('div', { class: 'composer' },
-      h('div', { class: 'composer-inner' }, this.input, this.sendBtn, this.stopBtn),
+      this.tray,
+      h('div', { class: 'composer-inner' }, fileInput, attachBtn, this.input, this.sendBtn, this.stopBtn),
       this.opts.hint ? h('div', { class: 'hint' }, this.opts.hint) : null);
+    const hasFiles = e => e.dataTransfer?.types.includes('Files');
+    composer.addEventListener('dragover', e => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      composer.classList.add('dropping');
+    });
+    composer.addEventListener('dragleave', e => { if (!composer.contains(e.relatedTarget)) composer.classList.remove('dropping'); });
+    composer.addEventListener('drop', e => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      composer.classList.remove('dropping');
+      this.addImages([...e.dataTransfer.files]);
+    });
     fill(this.el, h('div', { class: 'conv' }, this.opts.noHead ? null : head, this.scroller, composer));
   }
 
@@ -92,16 +158,52 @@ export class ConversationView {
 
   focus() { this.input.focus(); }
 
+  async addImages(files) {
+    for (const file of files) {
+      if (!IMAGE_TYPES.includes(file.type)) { toast(`${file.name}: only PNG, JPEG, GIF and WebP images can be attached.`, 'error'); continue; }
+      if (this.attachments.length >= MAX_IMAGES) { toast(`At most ${MAX_IMAGES} images per message.`, 'error'); break; }
+      try {
+        this.attachments.push(await prepareImage(file));
+      } catch {
+        toast(`${file.name} could not be read or is too large.`, 'error');
+      }
+      this.renderTray();
+    }
+  }
+
+  renderTray() {
+    fill(this.tray, this.attachments.map((src, i) => h('div', { class: 'thumb' },
+      h('img', { src, alt: 'Attached image', onclick: () => viewImage(src) }),
+      h('button', { class: 'remove', title: 'Remove image', onclick: () => { this.attachments.splice(i, 1); this.renderTray(); } }, '×'))));
+    this.tray.hidden = !this.attachments.length;
+  }
+
   async load() {
+    const mine = this.loadSeq = (this.loadSeq || 0) + 1;
     if (!this.opts.convId) { this.renderMessages([]); this.setRunning(false); return; }
     const conv = await api('GET', `/api/conversations/${this.opts.convId}`);
-    if (this.disposed) return;
+    if (this.disposed || mine !== this.loadSeq) return;
     this.conv = conv;
     if (!this.opts.title) this.setTitle(conv.title);
     this.renderMessages(conv.messages);
     if (conv.active_run) this.attach(conv.active_run.id, conv.active_run.resume_from);
     else this.setRunning(false);
     this.scrollToBottom(true);
+  }
+
+  /** Show another conversation in the same view. The current one stays on screen until the new one has loaded. */
+  async switchTo(opts) {
+    Object.assign(this.opts, opts);
+    this.detach();
+    this.run = null;
+    this.blocks.clear();
+    this.setRunning(false);
+    if (this.opts.title) this.setTitle(this.opts.title);
+    this.input.value = '';
+    this.autosize();
+    this.attachments = [];
+    this.renderTray();
+    await this.load();
   }
 
   // ------------------------------------------------------------ rendering stored history
@@ -122,8 +224,10 @@ export class ConversationView {
     }
     for (const m of messages) {
       if (m.role === 'user') {
-        const texts = typeof m.content === 'string' ? [m.content] : m.content.filter(b => b.type === 'text').map(b => b.text);
-        if (texts.length) this.addUserBubble(texts.join('\n\n'), m.created_at);
+        const blocks = typeof m.content === 'string' ? [{ type: 'text', text: m.content }] : m.content;
+        const texts = blocks.filter(b => b.type === 'text').map(b => b.text);
+        const images = blocks.filter(b => b.type === 'image' && b.upload).map(b => `/api/uploads/${b.upload}`);
+        if (texts.length || images.length) this.addUserBubble(texts.join('\n\n'), m.created_at, images);
       } else if (m.role === 'assistant') {
         const bubble = this.ensureAssistantBubble(m.created_at);
         const turn = h('div', { class: 'stack', style: { gap: '10px' } });
@@ -136,16 +240,19 @@ export class ConversationView {
     }
   }
 
-  addUserBubble(text, when) {
+  addUserBubble(text, when, images = []) {
     this.inner.querySelector(':scope > .empty')?.remove();
     this.currentBubble = null;
     const long = text.length > 900;
-    const bubble = h('div', { class: 'bubble' }, long ? text.slice(0, 600) + '…' : text);
+    const body = h('div', {}, long ? text.slice(0, 600) + '…' : text);
     if (long) {
       const more = h('a', { href: '#', class: 'small', style: { display: 'block', marginTop: '6px' } }, 'Show full message');
-      more.onclick = e => { e.preventDefault(); bubble.textContent = text; };
-      bubble.append(more);
+      more.onclick = e => { e.preventDefault(); body.textContent = text; };
+      body.append(more);
     }
+    const bubble = h('div', { class: 'bubble' },
+      images.length ? h('div', { class: 'msg-images' }, images.map(src => h('img', { src, alt: 'Attached image', loading: 'lazy', onclick: () => viewImage(src) }))) : null,
+      text ? body : null);
     this.inner.append(h('div', { class: 'msg user' }, h('div', { class: 'who' }, 'You', when ? h('span', { class: 'muted' }, '· ' + fmtDate(when)) : null), bubble));
   }
 
@@ -439,17 +546,20 @@ export class ConversationView {
 
   async send() {
     const text = this.input.value.trim();
-    if (this.run || (!text && !this.opts.allowEmptySend)) return;
+    const images = [...this.attachments];
+    if (this.run || (!text && !images.length && !this.opts.allowEmptySend)) return;
     this.sendBtn.disabled = true;
     try {
       const res = this.opts.sendFn
-        ? await this.opts.sendFn(text)
-        : await api('POST', `/api/conversations/${this.opts.convId}/messages`, { text });
+        ? await this.opts.sendFn(text, images)
+        : await api('POST', `/api/conversations/${this.opts.convId}/messages`, { text, images });
       if (!res) return;
       if (res.conversation_id) this.opts.convId = res.conversation_id;
       this.input.value = '';
       this.autosize();
-      this.addUserBubble(text || '▶ Run the agent');
+      this.attachments = [];
+      this.renderTray();
+      this.addUserBubble(text || (images.length ? '' : '▶ Run the agent'), undefined, images);
       this.attach(res.run.id, res.run.resume_from);
       this.startTurn();
       this.scrollToBottom(true);

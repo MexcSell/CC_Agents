@@ -5,6 +5,7 @@ export const state = {
   info: null,
   dirty: new Set(),        // editors with unsaved changes
   expectRestart: false,
+  forceRoute: false,       // set by go() to rebuild the page even if it could update in place
 };
 
 // ---------------------------------------------------------------- API
@@ -44,10 +45,12 @@ export async function api(method, path, body, { quiet = false } = {}) {
 
 export const enc = encodeURIComponent;
 
-/** Navigate to a hash route; re-renders even if the hash is unchanged. */
+/** Navigate to a hash route; rebuilds the page if the hash is unchanged. */
 export function go(hash) {
-  if (location.hash === hash) window.dispatchEvent(new HashChangeEvent('hashchange'));
-  else location.hash = hash;
+  if (location.hash === hash) {
+    state.forceRoute = true;
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+  } else location.hash = hash;
 }
 
 export function field(label, input, hint) {

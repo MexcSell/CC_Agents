@@ -20,7 +20,7 @@ from claude_agent_sdk import (AssistantMessage, ClaudeAgentOptions, ClaudeSDKCli
                               TextBlock, ThinkingBlock, ToolResultBlock, ToolUseBlock, UserMessage,
                               create_sdk_mcp_server, tool)
 
-from . import db, fsops, maintenance, tools as T
+from . import db, fsops, images, maintenance, tools as T
 from .agents import CLAUDE_CODE_NOTES, AgentSpec
 from .config import DATA_DIR
 
@@ -74,22 +74,32 @@ def _text_of(content) -> str:
     return "\n\n".join(b["text"] for b in content if b.get("type") == "text" and b.get("text", "").strip())
 
 
-def _prompt(messages: list[dict], options: dict) -> tuple[str, str | None]:
+def _prompt(messages: list[dict], options: dict) -> tuple[str | list[dict], str | None]:
     """The prompt for this run and the session to resume.
 
     Messages the Claude Code session has not seen (an earlier stretch on the API engine, or a
-    session that could not be resumed) are prepended as a plain-text transcript.
+    session that could not be resumed) are prepended as a plain-text transcript. A message with
+    attached images becomes a list of content blocks: the images, then the text.
     """
     session = options.get("cc_session_id")
     seen = options.get("cc_last_message_id", 0) if session else 0
-    text = _text_of(messages[-1]["content"])
+    last = messages[-1]["content"]
+    text = _text_of(last)
     lines = [f"[{'User' if m['role'] == 'user' else 'Assistant'}]\n{t}"
              for m in messages[:-1] if m["id"] > seen and (t := _text_of(m["content"]).strip())]
     if lines:
         transcript = "\n\n".join(lines)[-TRANSCRIPT_LIMIT:]
         text = ("Earlier messages of this conversation, for context (they were exchanged outside this session):"
                 f"\n\n{transcript}\n\n---\n\n{text}")
+    pictures = [images.api_block(b) for b in last if b.get("type") == "image"] if isinstance(last, list) else []
+    if pictures:
+        return pictures + ([{"type": "text", "text": text}] if text.strip() else []), session
     return text, session
+
+
+async def _user_message(content: list[dict]):
+    """A prompt with content blocks, as the stream of one user message that ClaudeSDKClient.query accepts."""
+    yield {"type": "user", "message": {"role": "user", "content": content}, "parent_tool_use_id": None}
 
 
 def _tool_text(text: str, is_error: bool) -> dict:
@@ -232,7 +242,7 @@ class _Session:
             prompt, _ = _prompt(messages, {})
             await self.attempt(prompt, None)
 
-    async def attempt(self, prompt: str, resume: str | None) -> None:
+    async def attempt(self, prompt: str | list[dict], resume: str | None) -> None:
         self.output = False        # stored any assistant output in this attempt
         self.started = False       # Claude Code accepted the prompt (init message seen)
         self.streamed = False      # stream events seen for the current assistant message
@@ -241,7 +251,7 @@ class _Session:
         final: ResultMessage | None = None
         try:
             async with ClaudeSDKClient(options=_options(self.run, self.spec, self.conv, resume, stderr)) as client:
-                await client.query(prompt)
+                await client.query(prompt if isinstance(prompt, str) else _user_message(prompt))
                 consume = asyncio.create_task(self.consume(client))
                 watcher = asyncio.create_task(self.watch_cancel(client, consume))
                 try:

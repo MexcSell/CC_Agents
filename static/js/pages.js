@@ -20,6 +20,13 @@ const paneNote = text => h('details', {
   class: 'small muted pane-note', open: openNotes.has(text),
   ontoggle: e => e.target.open ? openNotes.add(text) : openNotes.delete(text),
 }, h('summary', { title: 'Show / hide' }, text));
+// Re-render a list pane, keeping the scroll position of its .pane-body.
+const refill = (pane, ...children) => {
+  const top = pane.querySelector('.pane-body')?.scrollTop || 0;
+  fill(pane, ...children);
+  const body = pane.querySelector('.pane-body');
+  if (body) body.scrollTop = top;
+};
 
 // ================================================================ dashboard
 
@@ -93,12 +100,11 @@ function topicModal(topic, onSaved) {
   setTimeout(() => title.focus(), 30);
 }
 
-export async function chatPage(view, [topicParam, convParam]) {
+export async function chatPage(view, params) {
   let topics = await api('GET', '/api/topics');
-  const topicId = topicParam ? +topicParam : topics[0]?.id;
-  let convId = convParam ? +convParam : null;
-  if (!topicParam && topicId) history.replaceState(null, '', `#/chat/${topicId}`);
-  const topic = topics.find(t => t.id === topicId);
+  let topicId = null;
+  let convId = null;
+  let topic = null;
 
   const topicsPane = h('div', { class: 'pane' });
   const convsPane = h('div', { class: 'pane' });
@@ -110,7 +116,7 @@ export async function chatPage(view, [topicParam, convParam]) {
 
   const editTopic = t => topicModal(t, saved => go(`#/chat/${saved.id}`));
 
-  const renderTopics = () => fill(topicsPane,
+  const renderTopics = () => refill(topicsPane,
     h('div', { class: 'pane-head' }, paneTitle('🏷', 'Topics'), newBtn('New topic', () => editTopic(null))),
     h('div', { class: 'pane-body' }, topics.length
       ? topics.map(t => h('div', { class: `list-item${t.id === topicId ? ' active' : ''}`, onclick: () => go(`#/chat/${t.id}`) },
@@ -123,7 +129,10 @@ export async function chatPage(view, [topicParam, convParam]) {
   let convs = [];
   const loadConvs = async () => {
     if (!topic) return;
-    convs = await api('GET', `/api/conversations?kind=chat&topic_id=${topic.id}`, undefined, { quiet: true });
+    const tid = topic.id;
+    const list = await api('GET', `/api/conversations?kind=chat&topic_id=${tid}`, undefined, { quiet: true });
+    if (topic?.id !== tid) return;  // another topic was selected meanwhile
+    convs = list;
     renderConvs();
     const current = convs.find(c => c.id === convId);
     if (current && cv) cv.setTitle(current.title);
@@ -171,7 +180,7 @@ export async function chatPage(view, [topicParam, convParam]) {
       fill(convsPane, h('div', { class: 'pane-head' }, paneTitle('💬', 'Conversations')), h('div', { class: 'empty small' }, 'Select or create a topic.'));
       return;
     }
-    fill(convsPane,
+    refill(convsPane,
       h('div', { class: 'pane-head' }, paneTitle('💬', topic.title, { class: 'ellipsis', title: topic.title }),
         newBtn('New conversation', () => go(`#/chat/${topic.id}`)),
         h('button', { class: 'sm ghost icon', title: 'Topic actions', onclick: topicMenu }, '⋯')),
@@ -187,41 +196,72 @@ export async function chatPage(view, [topicParam, convParam]) {
         : h('div', { class: 'empty small' }, 'No conversations yet. Write a message to start one.')));
   };
 
-  renderTopics();
-  renderConvs();
   let cv = null;
-  if (!topic) {
-    mainPane.append(h('div', { class: 'empty', style: { margin: 'auto' } }, h('div', { class: 'big' }, '💬'),
-      h('p', {}, 'Create a topic, then start conversations with Claude about it.'),
-      h('button', { class: 'primary', onclick: () => editTopic(null) }, '+ Create a topic')));
-    return;
-  }
   const convActions = [
     h('button', { class: 'sm ghost', title: 'Rename', onclick: renameConv }, '✎'),
     h('button', { class: 'sm ghost', title: 'Export as Markdown', onclick: () => { location.href = `/api/conversations/${convId}/export`; } }, '⤓'),
     h('button', { class: 'sm ghost danger', title: 'Delete conversation', onclick: () => deleteConv(convs.find(c => c.id === convId) || { id: convId, title: 'this conversation' }) }, '🗑'),
   ];
-  convActions.forEach(b => { b.hidden = !convId; });
-  cv = new ConversationView(mainPane, {
+  const convOpts = () => ({
     convId,
     title: convId ? '' : `New conversation · ${topic.title}`,
-    headerActions: convActions,
     emptyText: `Start a conversation about "${topic.title}".`,
-    sendFn: convId ? null : async text => {
-      if (!text) return null;
-      const c = await api('POST', '/api/conversations', { kind: 'chat', topic_id: topic.id });
+    sendFn: convId ? null : async (text, images) => {
+      if (!text && !images.length) return null;
+      const t = topic;
+      const c = await api('POST', '/api/conversations', { kind: 'chat', topic_id: t.id });
       convId = c.id;
       cv.opts.sendFn = null;
-      history.replaceState(null, '', `#/chat/${topic.id}/${c.id}`);
+      history.replaceState(null, '', `#/chat/${t.id}/${c.id}`);
       convActions.forEach(b => { b.hidden = false; });
-      const res = await api('POST', `/api/conversations/${c.id}/messages`, { text });
+      const res = await api('POST', `/api/conversations/${c.id}/messages`, { text, images });
       return { ...res, conversation_id: c.id };
     },
-    onRunState: () => loadConvs(),
   });
-  await Promise.all([cv.load(), loadConvs()]);
-  cv.focus();
-  return () => cv.dispose();
+
+  // Show the topic and conversation of the route; called on load and on every selection.
+  let first = true;
+  let seq = 0;
+  const show = async ([topicParam, convParam]) => {
+    const mine = ++seq;
+    if (!first) {
+      const list = await api('GET', '/api/topics', undefined, { quiet: true });  // titles may have changed
+      if (mine !== seq) return;
+      topics = list;
+    }
+    first = false;
+    const prevTopic = topicId;
+    topicId = topicParam ? +topicParam : topics[0]?.id;
+    convId = convParam ? +convParam : null;
+    if (!topicParam && topicId) history.replaceState(null, '', `#/chat/${topicId}`);
+    topic = topics.find(t => t.id === topicId) || null;
+    if (topicId !== prevTopic) convs = [];
+    renderTopics();
+    renderConvs();
+    if (!topic) {
+      cv?.dispose();
+      cv = null;
+      fill(mainPane, h('div', { class: 'empty', style: { margin: 'auto' } }, h('div', { class: 'big' }, '💬'),
+        h('p', {}, 'Create a topic, then start conversations with Claude about it.'),
+        h('button', { class: 'primary', onclick: () => editTopic(null) }, '+ Create a topic')));
+      return;
+    }
+    convActions.forEach(b => { b.hidden = !convId; });
+    let loading;
+    if (cv) loading = cv.switchTo(convOpts());
+    else {
+      cv = new ConversationView(mainPane, { ...convOpts(), headerActions: convActions, onRunState: () => loadConvs() });
+      loading = cv.load();
+    }
+    await Promise.all([loading, loadConvs()]);
+    cv?.focus();
+  };
+
+  await show(params);
+  return {
+    update: show,
+    dispose: () => cv?.dispose(),
+  };
 }
 
 // ================================================================ developer
@@ -250,7 +290,7 @@ export async function devPage(view, [convParam]) {
     await api('PATCH', `/api/conversations/${s.id}`, { title });
     refresh();
   };
-  const renderList = () => fill(listPane,
+  const renderList = () => refill(listPane,
     h('div', { class: 'pane-head' }, paneTitle('🛠', 'Developer sessions'), newBtn('New session', () => go('#/dev'))),
     paneNote('The Developer agent reads and edits this website’s source code and restarts the server when needed.'),
     h('div', { class: 'pane-body' }, sessions.length
@@ -272,29 +312,42 @@ export async function devPage(view, [convParam]) {
 
   const renameBtn = h('button', { class: 'sm ghost', title: 'Rename', onclick: () => renameSession(sessions.find(s => s.id === convId)) }, '✎');
   renameBtn.hidden = !convId;
-  const cv = new ConversationView(mainPane, {
+  const convOpts = () => ({
     convId,
-    agentName: 'Developer agent',
     title: convId ? '' : 'New developer session',
-    headerActions: [renameBtn],
-    placeholder: 'Describe a change to this website… (Enter to send)',
-    emptyText: 'Ask for a change to this website, e.g. "Add a light/dark theme switch to the sidebar" or "Show each project\'s total estimated hours on the dashboard".',
-    sendFn: convId ? null : async text => {
-      if (!text) return null;
+    sendFn: convId ? null : async (text, images) => {
+      if (!text && !images.length) return null;
       const c = await api('POST', '/api/conversations', { kind: 'dev' });
       convId = c.id;
       cv.opts.sendFn = null;
       history.replaceState(null, '', `#/dev/${c.id}`);
       renameBtn.hidden = false;
-      const res = await api('POST', `/api/conversations/${c.id}/messages`, { text });
+      const res = await api('POST', `/api/conversations/${c.id}/messages`, { text, images });
       return { ...res, conversation_id: c.id };
     },
+  });
+  const cv = new ConversationView(mainPane, {
+    ...convOpts(),
+    agentName: 'Developer agent',
+    headerActions: [renameBtn],
+    placeholder: 'Describe a change to this website… (Enter to send)',
+    emptyText: 'Ask for a change to this website, e.g. "Add a light/dark theme switch to the sidebar" or "Show each project\'s total estimated hours on the dashboard".',
     onRunState: () => { refresh(); renderServerPanel(sidePane); },
   });
+  renderServerPanel(sidePane);
   await cv.load();
   cv.focus();
-  renderServerPanel(sidePane);
-  return () => cv.dispose();
+  return {
+    // Selecting another session swaps the conversation only; the session list and server panel stay.
+    update: async ([param]) => {
+      convId = param ? +param : null;
+      renameBtn.hidden = !convId;
+      renderList();
+      await Promise.all([cv.switchTo(convOpts()), refresh()]);
+      cv.focus();
+    },
+    dispose: () => cv.dispose(),
+  };
 }
 
 async function renderServerPanel(pane) {
@@ -473,7 +526,12 @@ export async function projectPage(view, [pidParam, tab = 'tasks', taskParam]) {
     agentSettings(body, project, p => { project = p; renderHeader(); });
     return;
   }
-  return tasksTab(body, project, taskParam ? +taskParam : null);
+  const tasks = await tasksTab(body, project, taskParam ? +taskParam : null);
+  return {
+    // Selecting another task of this project swaps the task detail only.
+    update: ([p, t = 'tasks', task]) => (+p === pid && t === 'tasks' ? tasks.select(task ? +task : null) : false),
+    dispose: tasks.dispose,
+  };
 }
 
 function agentSettings(el, project, onSaved) {
@@ -594,19 +652,35 @@ async function tasksTab(el, project, taskId) {
   renderList();
 
   let detail = null;
-  if (taskId) {
-    detail = new TaskDetail(detailEl, project, taskId, {
+  let closed = false;
+  const select = async id => {
+    taskId = id;
+    renderList();
+    detail?.dispose();
+    detail = null;
+    if (!id) {
+      fill(detailEl, h('div', { class: 'card empty' }, h('div', { class: 'big' }, '✅'),
+        tasks.length ? 'Select a task to see its estimate, progress, insights, next actions and the agent’s work.' : 'Create a task to assign work to the project agent.'));
+      return;
+    }
+    const d = detail = new TaskDetail(detailEl, project, id, {
       onChange: t => { const i = tasks.findIndex(x => x.id === t.id); if (i >= 0) tasks[i] = { ...tasks[i], ...t }; renderList(); },
       onDeleted: () => go(`#/projects/${project.id}/tasks`),
       onRunState: () => refreshList(),
     });
-    await detail.load();
-  } else {
-    detailEl.append(h('div', { class: 'card empty' }, h('div', { class: 'big' }, '✅'),
-      tasks.length ? 'Select a task to see its estimate, progress, insights, next actions and the agent’s work.' : 'Create a task to assign work to the project agent.'));
-  }
+    if (closed) d.dispose();
+    await d.load();
+  };
+  await select(taskId);
   const timer = setInterval(() => { if (tasks.some(t => t.running)) refreshList().catch(() => {}); }, 4000);
-  return () => { clearInterval(timer); detail?.dispose(); };
+  return {
+    select: async id => {
+      if (closed) return;
+      refreshList().catch(() => {});  // tasks may have been created or deleted
+      await select(id);
+    },
+    dispose: () => { closed = true; clearInterval(timer); detail?.dispose(); },
+  };
 }
 
 class TaskDetail {
@@ -619,15 +693,13 @@ class TaskDetail {
     this.convHost = h('div', { class: 'task-conv' });
   }
 
+  // Builds the detail off-screen and puts it in place once the task and its work log have loaded,
+  // so the previously shown task stays visible until then.
   async load() {
-    this.task = await api('GET', `/api/tasks/${this.id}`);
+    const task = await api('GET', `/api/tasks/${this.id}`);
+    if (this.disposed) return;
+    this.task = task;
     const agent = this.project.agent;
-    fill(this.el, h('div', { class: 'stack' }, this.info,
-      h('div', { class: 'card pad-sm' },
-        h('div', { class: 'row', style: { marginBottom: '8px' } },
-          h('h3', { class: 'grow', style: { margin: 0 } }, `🤖 ${agent.name} — work log`),
-          h('span', { class: 'small muted' }, `${state.info?.engine === 'api' ? 'API' : 'Claude Code'} · ${agent.model} · effort ${agent.effort}`)),
-        this.convHost)));
     this.render();
     const started = !!this.task.conversation_id;
     this.cv = new ConversationView(this.convHost, {
@@ -639,8 +711,8 @@ class TaskDetail {
       sendLabel: started ? 'Send' : '▶ Run agent',
       placeholder: started ? 'Message the agent, or press Send with no text to let it continue…' : 'Optional instructions for the agent, then press Run agent…',
       emptyText: `${agent.name} has not worked on this task yet. Press "Run agent" to start.`,
-      sendFn: async text => {
-        const res = await api('POST', `/api/tasks/${this.id}/run`, { message: text });
+      sendFn: async (text, images) => {
+        const res = await api('POST', `/api/tasks/${this.id}/run`, { message: text, images });
         this.cv.setSendLabel('Send');
         return res;
       },
@@ -653,6 +725,14 @@ class TaskDetail {
       },
     });
     await this.cv.load();
+    if (this.disposed) return;
+    fill(this.el, h('div', { class: 'stack' }, this.info,
+      h('div', { class: 'card pad-sm' },
+        h('div', { class: 'row', style: { marginBottom: '8px' } },
+          h('h3', { class: 'grow', style: { margin: 0 } }, `🤖 ${agent.name} — work log`),
+          h('span', { class: 'small muted' }, `${state.info?.engine === 'api' ? 'API' : 'Claude Code'} · ${agent.model} · effort ${agent.effort}`)),
+        this.convHost)));
+    this.cv.scrollToBottom(true);
   }
 
   apply(task) {
@@ -755,7 +835,7 @@ class TaskDetail {
     this.cb.onDeleted?.();
   }
 
-  dispose() { this.cv?.dispose(); }
+  dispose() { this.disposed = true; this.cv?.dispose(); }
 }
 
 // ================================================================ files

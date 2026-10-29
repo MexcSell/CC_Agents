@@ -14,7 +14,7 @@ const routes = [
   [/^#\/c\/(\d+)$/, pages.conversationRedirect, null],
 ];
 
-let cleanup = null;
+let current = null;   // { page, dispose, update } of the page on screen
 let token = 0;
 let currentHash = location.hash;
 
@@ -27,26 +27,55 @@ async function route() {
     state.dirty.clear();
   }
   currentHash = location.hash;
+  const force = state.forceRoute;
+  state.forceRoute = false;
   const [path, qs] = (location.hash || '#/').split('?');
   const match = routes.map(([rx, page, nav]) => [path.match(rx), page, nav]).find(([m]) => m);
   if (!match) { location.replace('#/'); return; }
   const [m, page, nav] = match;
+  const params = m.slice(1);
+  const query = new URLSearchParams(qs || '');
   const mine = ++token;
-  if (cleanup) {
-    try { cleanup(); } catch (e) { console.error(e); }
-    cleanup = null;
-  }
   document.querySelectorAll('#sidebar a.nav').forEach(a => a.classList.toggle('active', a.dataset.nav === nav));
-  const container = h('div', { style: { height: '100%' } });
-  fill(document.getElementById('view'), container);
+
+  // Selecting something inside the page on screen (a conversation, a session, a task) updates it in place.
+  if (!force && current?.page === page && current.update) {
+    try {
+      if (await current.update(params, query) !== false) return;
+    } catch (e) { console.error(e); }
+    if (mine !== token) return;
+  }
+  if (current) {
+    try { current.dispose?.(); } catch (e) { console.error(e); }
+    current = null;
+  }
+
+  // Build the new page invisibly on top of the old one and swap when it has loaded (at most 400 ms later),
+  // so navigating never flashes an empty screen.
+  const view = document.getElementById('view');
+  const old = [...view.children];
+  const container = h('div', { class: old.length ? 'route loading' : 'route' });
+  view.append(container);
+  let shown = !old.length;
+  const reveal = () => {
+    if (shown) return;
+    shown = true;
+    old.forEach(n => n.remove());
+    container.classList.remove('loading');
+  };
+  const timer = setTimeout(reveal, 400);
   try {
-    const dispose = await page(container, m.slice(1), new URLSearchParams(qs || ''));
-    if (mine !== token) { dispose?.(); return; }
-    cleanup = dispose || null;
+    const res = await page(container, params, query);
+    const next = typeof res === 'function' ? { dispose: res } : { ...res };
+    if (mine !== token) { next.dispose?.(); return; }
+    current = { page, ...next };
   } catch (e) {
     if (mine !== token) return;
     console.error(e);
     fill(container, h('div', { class: 'page' }, h('div', { class: 'notice error' }, `Could not load this page: ${e.message}`)));
+  } finally {
+    clearTimeout(timer);
+    if (mine === token) reveal();
   }
 }
 

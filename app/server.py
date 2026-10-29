@@ -12,11 +12,12 @@ import time
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import agents, db, fsops, maintenance, runs
+from . import agents, db, fsops, images, maintenance, runs
 from .config import (ACCESS_TOKEN, APP_ROOT, EFFORTS, HOST, MODELS, PORT, RESTART_EXIT_CODE,
                      STATIC_DIR)
 
@@ -26,6 +27,8 @@ STOPPING = threading.Event()
 MODEL_IDS = {m["id"] for m in MODELS}
 
 app = FastAPI(title="Agent Group", docs_url="/api/docs", openapi_url="/api/openapi.json")
+# Conversations with tool output run to hundreds of KB of JSON. Event streams are left uncompressed.
+app.add_middleware(GZipMiddleware, minimum_size=2048)
 
 
 # ---------------------------------------------------------------- middleware
@@ -49,6 +52,11 @@ async def guard(request: Request, call_next):
 
 @app.exception_handler(fsops.FsError)
 async def fs_error(_: Request, exc: fsops.FsError):
+    return JSONResponse({"detail": str(exc)}, status_code=400)
+
+
+@app.exception_handler(images.ImageError)
+async def image_error(_: Request, exc: images.ImageError):
     return JSONResponse({"detail": str(exc)}, status_code=400)
 
 
@@ -296,6 +304,14 @@ class ConversationPatch(BaseModel):
 
 class MessageIn(BaseModel):
     text: str = ""
+    images: list[str] = []   # base64 image data, optionally as data: URLs
+
+
+def _user_content(cid: int, text: str, encoded: list[str]):
+    """The stored user message: plain text, or the attached images followed by the text."""
+    if not encoded:
+        return text
+    return images.save(cid, encoded) + ([{"type": "text", "text": text}] if text.strip() else [])
 
 
 def _conv_or_404(cid: int) -> dict:
@@ -355,27 +371,34 @@ def delete_conversation(cid: int):
     _conv_or_404(cid)
     _cancel_conversations("SELECT ? AS id", (cid,))
     db.execute("DELETE FROM conversations WHERE id = ?", (cid,))
+    images.remove(cid)
     return {"ok": True}
+
+
+@app.get("/api/uploads/{cid}/{name}")
+def get_upload(cid: int, name: str):
+    p = images.path(f"{cid}/{name}") or not_found("Image not found")
+    return FileResponse(p, headers={"Cache-Control": "private, max-age=31536000, immutable"})
 
 
 @app.post("/api/conversations/{cid}/messages")
 def send_message(cid: int, body: MessageIn):
     conv = _conv_or_404(cid)
     if conv["kind"] == "task":
-        return run_task(conv["task_id"], TaskRunIn(message=body.text))
+        return run_task(conv["task_id"], TaskRunIn(message=body.text, images=body.images))
     text = body.text.strip()
-    if not text:
+    if not text and not body.images:
         raise HTTPException(400, "Message is empty")
     if conv["kind"] == "chat":
         spec = agents.chat_spec(conv)
     else:
         spec = agents.dev_spec()
     if conv["title"] in ("New conversation", "Developer session") and not db.list_messages(cid):
-        title = " ".join(text.split())[:70]
+        title = " ".join(text.split())[:70] or "Image"
         db.execute("UPDATE conversations SET title = ? WHERE id = ?", (title, cid))
         conv["title"] = title
     try:
-        run = runs.start(cid, conv["kind"], conv["title"], text, spec)
+        run = runs.start(cid, conv["kind"], conv["title"], _user_content(cid, text, body.images), spec)
     except runs.RunBusy as e:
         raise HTTPException(409, str(e))
     return {"run": run.info()}
@@ -392,6 +415,8 @@ def export_conversation(cid: int):
         for b in blocks:
             if b["type"] == "text" and b.get("text", "").strip():
                 parts.append(b["text"])
+            elif b["type"] == "image":
+                parts.append("[image]")
             elif b["type"] == "tool_use":
                 parts.append(f"> 🔧 `{b['name']}` {json.dumps(b['input'], ensure_ascii=False)[:300]}")
             elif b["type"] == "tool_result":
@@ -589,6 +614,7 @@ class TaskPatch(BaseModel):
 
 class TaskRunIn(BaseModel):
     message: str = ""
+    images: list[str] = []
 
 
 TASK_STATUSES = {"todo", "in_progress", "blocked", "review", "done"}
@@ -681,6 +707,7 @@ def run_task(tid: int, body: TaskRunIn):
         content = agents.task_kickoff_message(task, body.message)
     else:
         content = agents.task_followup_message(task, body.message, conv, project)
+    content = _user_content(conv["id"], content, body.images)
     if task["status"] == "todo":
         db.update_task(tid, {"status": "in_progress"})
     try:
@@ -795,6 +822,7 @@ def main() -> None:
         server.should_exit = True
 
     maintenance.on_restart(stop)
+    images.prune()
     log.info("Agent Group listening on http://%s:%s (supervised=%s)", HOST, PORT, maintenance.under_supervisor())
     server.run()
     runs.cancel_all()

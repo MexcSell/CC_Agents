@@ -15,7 +15,7 @@ import uuid
 
 import anthropic
 
-from . import db, maintenance, tools as T
+from . import db, images, maintenance, tools as T
 from .agents import AgentSpec
 from .config import FALLBACK_MODELS
 
@@ -299,7 +299,8 @@ def api_history(messages: list[dict]) -> list[dict]:
     """Stored messages as Messages API input.
 
     Turns produced by the Claude Code engine used Claude Code's own tools and session, so only
-    their text is replayed; API-engine turns are sent back exactly as they were returned.
+    their text is replayed; API-engine turns are sent back exactly as they were returned. Attached
+    images are read from disk.
     """
     history = []
     for m in messages:
@@ -310,6 +311,8 @@ def api_history(messages: list[dict]) -> list[dict]:
             if not text.strip():
                 continue
             content = [{"type": "text", "text": text}]
+        else:
+            content = images.api_content(content)
         history.append({"role": m["role"], "content": content})
     return history
 
