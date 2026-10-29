@@ -15,7 +15,7 @@ import uuid
 
 import anthropic
 
-from . import db, images, maintenance, team, tools as T
+from . import db, images, maintenance, project_setup, team, tools as T
 from .agents import AgentSpec
 from .config import FALLBACK_MODELS
 
@@ -430,6 +430,8 @@ def _run_tool(run: Run, spec: AgentSpec, block: dict) -> tuple[str, bool]:
             return _update_task(run, spec.task_id, args), False
         if name in team.HANDLERS:
             return T.clip(team.HANDLERS[name](run, spec, args)), False
+        if name in project_setup.HANDLERS:
+            return T.clip(project_setup.HANDLERS[name](run, spec, args)), False
         if name == "restart_server":
             return _restart(run, args), False
         if name == "read_server_log":

@@ -15,7 +15,7 @@ from .config import APP_ROOT, DEV_PROTECTED_DIRS, PORT
 
 @dataclass
 class AgentSpec:
-    kind: str                      # "chat" | "dev" | "task" | "consult"
+    kind: str                      # "chat" | "dev" | "task" | "consult" | "setup" (app/project_setup.py)
     model: str
     effort: str
     tools: list = field(default_factory=list)
@@ -45,6 +45,9 @@ CLAUDE_CODE_NOTES = {
             "ask_agent, ask_user, record_learning, create_subtasks, delegate and review_subtask) carry the prefix "
             "mcp__agent__, e.g. mcp__agent__update_task.",
     "consult": "\n\nIn this environment you can read the repository with Claude Code's Read, Glob and Grep tools.",
+    "setup": "\n\nIn this environment you read files with Claude Code's Read, Glob and Grep tools and the web with "
+             "WebFetch and WebSearch. Agent Group's setup tools carry the prefix mcp__agent__, e.g. "
+             "mcp__agent__list_groups and mcp__agent__create_tasks.",
 }
 
 
@@ -223,6 +226,11 @@ without a restart: `.venv/bin/python -m py_compile <files>` and an import of the
 report, say whether a restart is needed."""
 
 
+def project_brief(project: dict) -> str:
+    brief = (project.get("brief") or "").strip()
+    return f"\n\nProject brief (analysis of the project and its repository):\n{brief}" if brief else ""
+
+
 def task_system_prompt(project: dict, agent: dict) -> str:
     template, _ = templates.resolve_agent(agent)
     role_text = agent["role"].strip() or (template["role"] if template else "")
@@ -238,7 +246,7 @@ def task_system_prompt(project: dict, agent: dict) -> str:
 Agent Group.{role}{profile}
 
 Project description:
-{project['description'].strip() or '(none)'}
+{project['description'].strip() or '(none)'}{project_brief(project)}
 
 Your workspace root is the project's repository: {project['repo_path']}
 File tool paths are relative to it, and run_command runs in it.{site}
@@ -290,7 +298,7 @@ Agent Group.{role}{profile}
 A teammate is consulting you. Answer their questions from your expertise, concretely and briefly: give a \
 recommendation, the reasoning behind it, and the risks. You may read the project's repository \
 ({project['repo_path']}; paths are relative to it) to ground your answer, but you do not change anything \
-here. If the question needs a decision only the user can make, say so.
+here. If the question needs a decision only the user can make, say so.{project_brief(project)}
 
 The project team:
 {team_roster(project, agent)}
@@ -351,7 +359,9 @@ def task_followup_message(project: dict, agent: dict, task: dict, note: str, con
                                                    "your last turn.)")
     if task_system_prompt(project, agent) != conv["system_prompt"]:
         profile = template_profile(agent)
+        brief = project_brief(project).strip()
         parts.append("The project, team or agent settings were updated. "
+                     + (f"{brief}\n\n" if brief else "")
                      + (f"{profile}\n\n" if profile else "")
                      + f"Current team:\n{team_roster(project, agent)}\n\n"
                      + "Current agent instructions:\n" + (agent["instructions"].strip() or "(none)"))

@@ -452,7 +452,7 @@ function registerProjectModal() {
           const p = await api('POST', '/api/projects', {
             name: name.value, description: details.value, repo_path: repo.value.trim(), create_repo: create.checked,
           });
-          toast(`Project "${p.name}" registered`, 'ok');
+          toast(`Project "${p.name}" registered. The setup agent is analysing it, staffing its team and planning its tasks.`, 'ok');
           go(`#/projects/${p.id}`);
         } catch { return false; }
       },
@@ -466,7 +466,9 @@ export async function projectsPage(view, _params, query) {
   view.append(page);
   const projects = await api('GET', '/api/projects');
   const card = p => h('div', { class: 'card project-card', onclick: () => go(`#/projects/${p.id}`) },
-    h('div', { class: 'row' }, h('h2', { class: 'grow ellipsis', style: { margin: 0 } }, p.name), p.running ? h('span', { class: 'badge accent' }, runDot(), `${p.running} running`) : null),
+    h('div', { class: 'row' }, h('h2', { class: 'grow ellipsis', style: { margin: 0 } }, p.name),
+      p.setup?.running ? h('span', { class: 'badge accent' }, runDot(), 'setting up') : null,
+      p.running ? h('span', { class: 'badge accent' }, runDot(), `${p.running} running`) : null),
     p.description ? h('div', { class: 'muted small', style: { display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' } }, p.description) : null,
     h('div', { class: 'path' }, '📁 ', p.repo_path, p.repo_exists ? '' : '  ⚠ missing'),
     h('div', { class: 'row small', style: { gap: '6px', flexWrap: 'wrap' } }, '👑 ', h('b', {}, p.agent?.name || '—'), p.agent?.template ? h('code', { class: 'sym' }, `@${p.agent.template}`) : null,
@@ -482,7 +484,7 @@ export async function projectsPage(view, _params, query) {
       h('button', { class: 'primary', onclick: () => registerProjectModal() }, '+ Register project')),
     projects.length ? h('div', { class: 'cards' }, projects.map(card))
       : h('div', { class: 'card empty' }, h('div', { class: 'big' }, '📋'),
-        h('p', {}, 'Register a project with its name, repository folder and details.'),
+        h('p', {}, 'Register a project with its name, repository folder and details. A setup agent analyses it, puts together its agent team and plans its tasks.'),
         h('button', { class: 'primary', onclick: () => registerProjectModal() }, 'Register your first project')));
   if (query.get('new')) {
     history.replaceState(null, '', '#/projects');
@@ -508,6 +510,7 @@ export async function projectPage(view, [pidParam, tab = 'tasks', taskParam], qu
       h('h1', {}, dev ? 'Development team' : project.name),
       h('span', { class: 'badge accent', title: `Lead · ${project.agent.model} · effort ${project.agent.effort}` }, `👑 ${project.agent.name}`),
       h('a', { class: 'badge', href: `${base}/team`, title: project.agents.map(a => `${'  '.repeat(a.depth)}${a.name}`).join('\n') }, `👥 ${project.agents.length} agent${project.agents.length === 1 ? '' : 's'}`),
+      project.setup?.running ? h('a', { class: 'badge accent', href: `${base}/tasks`, title: 'The setup agent is analysing the project, staffing its team and planning its tasks' }, runDot(), 'Setting up') : null,
       h('div', { class: 'spacer' }),
       h('a', { class: 'mono small', href: `${base}/files`, title: 'Open the repository' }, `📁 ${project.repo_path}`)),
     project.repo_exists ? null : h('div', { class: 'notice warn', style: { marginBottom: '10px' } }, `The repository folder ${project.repo_path} does not exist. Fix it under "Team & settings".`),
@@ -538,7 +541,12 @@ export async function projectPage(view, [pidParam, tab = 'tasks', taskParam], qu
     await knowledgeTab(body, project);
     return;
   }
-  const tasks = await tasksTab(body, project, taskParam ? +taskParam : null);
+  // The setup agent changes the team and the brief: reload the project in place (tasksTab holds it).
+  const reloadProject = async () => {
+    Object.assign(project, await api('GET', `/api/projects/${pid}`, undefined, { quiet: true }));
+    renderHeader();
+  };
+  const tasks = await tasksTab(body, project, taskParam ? +taskParam : null, reloadProject);
   return {
     // Selecting another task of this project swaps the task detail only.
     update: ([p, t = 'tasks', task]) => (+p === pid && t === 'tasks' ? tasks.select(task ? +task : null) : false),
@@ -626,7 +634,7 @@ function newTaskModal(project, onCreated) {
   setTimeout(() => title.focus(), 30);
 }
 
-async function tasksTab(el, project, taskId) {
+async function tasksTab(el, project, taskId, reloadProject) {
   let tasks = await api('GET', `/api/projects/${project.id}/tasks`);
   let filter = localStorage.getItem('task-filter') || 'all';
   const listEl = h('div', { class: 'task-list' });
@@ -637,7 +645,9 @@ async function tasksTab(el, project, taskId) {
   }, h('option', { value: 'all' }, 'All tasks'), Object.entries(STATUS_LABELS).map(([k, v]) => h('option', { value: k, selected: k === filter }, v)));
   el.append(h('div', { class: 'tasks-layout' },
     h('div', { class: 'stack' },
-      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: () => newTaskModal(project, t => go(`${projectBase(project.id)}/tasks/${t.id}`)) }, '+ New task'), h('div', { class: 'grow' }), filterSel),
+      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: () => newTaskModal(project, t => go(`${projectBase(project.id)}/tasks/${t.id}`)) }, '+ New task'),
+        project.system === 'dev' ? null : h('button', { title: 'Project setup: the analysis, the team and the task plan', onclick: () => go(`${projectBase(project.id)}/tasks`) }, '🧭 Setup'),
+        h('div', { class: 'grow' }), filterSel),
       listEl),
     detailEl));
 
@@ -653,7 +663,8 @@ async function tasksTab(el, project, taskId) {
   const renderList = () => {
     const shown = tasks.filter(t => filter === 'all' || t.status === filter);
     fill(listEl, ...(shown.length ? shown.map(item)
-      : [h('div', { class: 'card empty small' }, tasks.length ? 'No tasks with this status.' : `No tasks yet. Create one and ${project.agent.name} will plan it and put the team to work.`)]));
+      : [h('div', { class: 'card empty small' }, tasks.length ? 'No tasks with this status.'
+        : project.setup?.running ? 'The setup agent is planning the tasks…' : `No tasks yet. Create one and ${project.agent.name} will plan it and put the team to work.`)]));
   };
   const refreshList = async () => {
     tasks = await api('GET', `/api/projects/${project.id}/tasks`, undefined, { quiet: true });
@@ -670,8 +681,29 @@ async function tasksTab(el, project, taskId) {
     detail?.dispose();
     detail = null;
     if (!id) {
+      // No task selected: the setup agent's work (analysis, team, task plan), or an offer to run it.
+      if (project.setup) {
+        const d = detail = setupPanel(detailEl, project, {
+          onRunState: async running => {
+            await reloadProject().catch(() => {});
+            refreshList().catch(() => {});
+            if (running || closed) return;
+            toast('The setup agent has finished. Review the team and the tasks, then run them.', 'ok');
+            if (!taskId) select(null);   // refresh the panel's links to the brief and the team
+          },
+        });
+        if (closed) d.dispose();
+        await d.load();
+        return;
+      }
+      const analyse = async () => {
+        await api('POST', `/api/projects/${project.id}/setup`, { message: '' });
+        await reloadProject();
+        select(null);
+      };
       fill(detailEl, h('div', { class: 'card empty' }, h('div', { class: 'big' }, '✅'),
-        tasks.length ? 'Select a task to see its progress, sub-tasks, the team’s discussion and each agent’s work.' : 'Create a task to put the team to work.'));
+        h('p', {}, tasks.length ? 'Select a task to see its progress, sub-tasks, the team’s discussion and each agent’s work.' : 'Create a task to put the team to work.'),
+        project.system === 'dev' ? null : h('button', { onclick: analyse }, '🧭 Analyse the project and plan its tasks')));
       return;
     }
     const d = detail = new TaskDetail(detailEl, project, id, {
@@ -689,7 +721,7 @@ async function tasksTab(el, project, taskId) {
     await d.load();
   };
   await select(taskId);
-  const timer = setInterval(() => { if (tasks.some(t => t.running || t.team_running)) refreshList().catch(() => {}); }, 4000);
+  const timer = setInterval(() => { if (project.setup?.running || tasks.some(t => t.running || t.team_running)) refreshList().catch(() => {}); }, 4000);
   return {
     select: async id => {
       if (closed) return;
@@ -697,6 +729,38 @@ async function tasksTab(el, project, taskId) {
       await select(id);
     },
     dispose: () => { closed = true; clearInterval(timer); detail?.dispose(); },
+  };
+}
+
+/** The setup agent's conversation: its analysis, the team it chose and the tasks it planned. The user can
+ *  message it to adjust them. */
+function setupPanel(el, project, { onRunState }) {
+  const host = h('div', { class: 'task-conv' });
+  const cv = new ConversationView(host, {
+    convId: project.setup.conversation_id,
+    noHead: true,
+    copyParagraphs: true,
+    agentName: 'Setup agent',
+    allowEmptySend: true,
+    placeholder: 'Ask the setup agent to change the analysis, the team or the tasks. Send with no text to analyse the project again.',
+    sendFn: text => api('POST', `/api/projects/${project.id}/setup`, { message: text }),
+    onRunState,
+  });
+  return {
+    async load() {
+      await cv.load();
+      if (cv.disposed) return;
+      fill(el, h('div', { class: 'card pad-sm' },
+        h('div', { class: 'row', style: { marginBottom: '8px' } },
+          h('h3', { class: 'grow', style: { margin: 0 } }, '🧭 Project setup'),
+          project.brief ? h('a', { class: 'small', href: `${projectBase(project.id)}/knowledge` }, '📋 Project brief') : null,
+          h('a', { class: 'small', href: `${projectBase(project.id)}/team` }, `👥 Team (${project.agents.length})`)),
+        h('div', { class: 'small muted', style: { marginBottom: '8px' } },
+          'The setup agent analyses the project details and the repository, chooses or creates the agent team, and plans the tasks. It does not run them: select a task and press "Run agent" when you are ready.'),
+        host));
+      cv.scrollToBottom(true);
+    },
+    dispose: () => cv.dispose(),
   };
 }
 

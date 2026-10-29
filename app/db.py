@@ -180,9 +180,13 @@ with _lock:
     for col in ("category", "area", "language"):
         if col not in template_cols:
             _conn.execute(f"ALTER TABLE agent_templates ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
-    if "system" not in {r["name"] for r in _conn.execute("PRAGMA table_info(projects)")}:
+    project_cols = {r["name"] for r in _conn.execute("PRAGMA table_info(projects)")}
+    if "system" not in project_cols:
         # '' for the user's projects; 'dev' for the development team of this website (app/devteam.py)
         _conn.execute("ALTER TABLE projects ADD COLUMN system TEXT NOT NULL DEFAULT ''")
+    if "brief" not in project_cols:
+        # The project analysis written by the setup agent (app/project_setup.py); part of every agent's briefing
+        _conn.execute("ALTER TABLE projects ADD COLUMN brief TEXT NOT NULL DEFAULT ''")
     task_cols = {r["name"] for r in _conn.execute("PRAGMA table_info(tasks)")}
     if "parent_id" not in task_cols:
         _conn.execute("ALTER TABLE tasks ADD COLUMN parent_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE")

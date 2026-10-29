@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Res
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import agents, db, devteam, fsops, groups, images, maintenance, runs, team, templates, usage
+from . import agents, db, devteam, fsops, groups, images, maintenance, project_setup, runs, team, templates, usage
 from .config import (ACCESS_TOKEN, APP_ROOT, EFFORTS, HOST, MODELS, PORT, RESTART_EXIT_CODE,
                      STATIC_DIR)
 
@@ -72,6 +72,11 @@ async def group_error(_: Request, exc: groups.GroupError):
 
 @app.exception_handler(team.TeamError)
 async def team_error(_: Request, exc: team.TeamError):
+    return JSONResponse({"detail": str(exc)}, status_code=400)
+
+
+@app.exception_handler(project_setup.SetupError)
+async def setup_error(_: Request, exc: project_setup.SetupError):
     return JSONResponse({"detail": str(exc)}, status_code=400)
 
 
@@ -414,6 +419,8 @@ def send_message(cid: int, body: MessageIn):
     conv = _conv_or_404(cid)
     if conv["kind"] == "task":
         return run_task(conv["task_id"], TaskRunIn(message=body.text, images=body.images))
+    if conv["kind"] == "setup":
+        return run_setup(conv["options"]["project_id"], SetupIn(message=body.text))
     text = body.text.strip()
     if not text and not body.images:
         raise HTTPException(400, "Message is empty")
@@ -520,6 +527,7 @@ class ProjectIn(BaseModel):
     create_repo: bool = False
     group: str = ""               # symbol of an agent group: the project gets that whole team
     agent: AgentIn | None = None  # without a group: the single agent (with a group: default model and effort)
+    setup: bool = True            # start the setup agent: analysis, team, task plan (app/project_setup.py)
 
 
 class ProjectPatch(BaseModel):
@@ -579,20 +587,6 @@ def _unique_key(pid: int, name: str, exclude: int | None = None) -> str:
     return key
 
 
-def _insert_team(pid: int, group: dict, model: str, effort: str, ts: str) -> int:
-    """Create a group's members as the agents of project `pid` (inside a transaction). Returns the lead's id."""
-    tpl = {t["slug"]: t for t in db.query("SELECT slug, role, model, effort FROM agent_templates")}
-    ids: dict[str, int] = {}
-    for i, m in enumerate(group["members"]):
-        t = tpl.get(m["template"], {})
-        ids[m["key"]] = db._conn.execute(
-            "INSERT INTO agents(project_id, parent_id, key, sort, name, role, instructions, model, effort, template, "
-            "subagents, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, '', ?, ?, ?, '[]', ?, ?)",
-            (pid, ids.get(m["parent"]), m["key"], i, m["name"], t.get("role", ""), t.get("model") or model,
-             t.get("effort") or effort, m["template"], ts, ts)).lastrowid
-    return ids[group["members"][0]["key"]]
-
-
 def _group_or_400(symbol: str) -> dict:
     group = groups.by_slug(symbol)
     if not group:
@@ -621,6 +615,7 @@ def list_projects():
         p["open_questions"] = db.one("SELECT COUNT(*) n FROM questions q JOIN tasks t ON t.id = q.task_id "
                                      "WHERE t.project_id = ? AND q.status = 'open'", (p["id"],))["n"]
         p["repo_exists"] = Path(p["repo_path"]).is_dir()
+        p["setup"] = project_setup.status(p["id"])
     return projects
 
 
@@ -636,21 +631,39 @@ def create_project(body: ProjectIn):
             "INSERT INTO projects(name, description, repo_path, created_at, updated_at) VALUES(?, ?, ?, ?, ?)",
             (body.name.strip(), body.description, repo, ts, ts)).lastrowid
         if group:
-            _insert_team(pid, group, agent.model, agent.effort, ts)
+            groups.insert_team(pid, group, agent.model, agent.effort, ts)
         else:
             db._conn.execute(
                 "INSERT INTO agents(project_id, key, name, role, instructions, model, effort, template, subagents, "
                 "created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (pid, groups.slugify(agent.name) or "lead", agent.name.strip(), agent.role, agent.instructions,
                  agent.model, agent.effort, agent.template, json.dumps(agent.subagents), ts, ts))
-    return _project_or_404(pid)
+    if body.setup:
+        project_setup.start(pid)
+    return get_project(pid)
 
 
 @app.get("/api/projects/{pid}")
 def get_project(pid: int):
     p = _project_or_404(pid)
     p["repo_exists"] = Path(p["repo_path"]).is_dir()
+    p["setup"] = project_setup.status(pid)
     return p
+
+
+class SetupIn(BaseModel):
+    message: str = ""
+
+
+@app.post("/api/projects/{pid}/setup")
+def run_setup(pid: int, body: SetupIn):
+    """Start the setup agent (analysis, team, task plan), or send it the next message."""
+    _project_or_404(pid)
+    try:
+        run, conv = project_setup.start(pid, body.message)
+    except runs.RunBusy as e:
+        raise HTTPException(409, str(e))
+    return {"run": run.info(), "conversation_id": conv["id"]}
 
 
 @app.put("/api/projects/{pid}")
@@ -736,12 +749,7 @@ def apply_group(pid: int, body: TeamIn):
     s = db.get_settings()
     model = body.model if body.model in MODEL_IDS else p["agent"]["model"] if p["agent"] else s["project_model"]
     effort = body.effort if body.effort in EFFORTS else p["agent"]["effort"] if p["agent"] else s["project_effort"]
-    with db.transaction():
-        db._conn.execute("DELETE FROM learnings WHERE scope = 'self' AND agent_id IN "
-                         "(SELECT id FROM agents WHERE project_id = ?)", (pid,))
-        db._conn.execute("DELETE FROM agents WHERE project_id = ?", (pid,))
-        lead = _insert_team(pid, group, model, effort, db.now())
-        db._conn.execute("UPDATE tasks SET assignee_id = ? WHERE project_id = ?", (lead, pid))
+    groups.apply_to_project(pid, group, model, effort)
     return _project_or_404(pid)
 
 
@@ -751,6 +759,9 @@ def delete_project(pid: int):
     _project_or_404(pid)
     _cancel_conversations("SELECT c.id FROM conversations c JOIN tasks t ON t.id = c.task_id "
                           "WHERE t.project_id = ?", (pid,))
+    setup = "SELECT id FROM conversations WHERE kind = 'setup' AND json_extract(options, '$.project_id') = ?"
+    _cancel_conversations(setup, (pid,))
+    db.execute(f"DELETE FROM conversations WHERE id IN ({setup})", (pid,))
     db.execute("DELETE FROM learnings WHERE project_id = ? AND scope != 'role'", (pid,))
     db.execute("DELETE FROM projects WHERE id = ?", (pid,))
     return {"ok": True}
@@ -787,7 +798,7 @@ def create_devteam(body: DevTeamIn):
         pid = db._conn.execute(
             "INSERT INTO projects(name, description, repo_path, system, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?)",
             (devteam.NAME, devteam.DESCRIPTION, str(APP_ROOT), devteam.SYSTEM, ts, ts)).lastrowid
-        _insert_team(pid, group, model, effort, ts)
+        groups.insert_team(pid, group, model, effort, ts)
     return get_devteam()
 
 

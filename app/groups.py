@@ -2,7 +2,7 @@
 
 A group's members are template-based agents with a name and the member they report to. Exactly one
 member, the lead, reports to nobody; it receives the project's tasks and delegates down the hierarchy.
-Registering a project with a group creates the whole team as the project's agents.
+Applying a group to a project creates the whole team as the project's agents.
 """
 
 import json
@@ -167,6 +167,35 @@ def save(fields: dict, gid: int | None = None) -> dict:
 
 def delete(gid: int) -> None:
     db.execute("DELETE FROM agent_groups WHERE id = ?", (gid,))
+
+
+# ---------------------------------------------------------------- teams of projects
+
+def insert_team(pid: int, group: dict, model: str, effort: str, ts: str) -> int:
+    """Create a group's members as the agents of project `pid` (inside a transaction). Members take the
+    model and effort of their template, or `model` and `effort`. Returns the lead's id."""
+    tpl = {t["slug"]: t for t in db.query("SELECT slug, role, model, effort FROM agent_templates")}
+    ids: dict[str, int] = {}
+    for i, m in enumerate(group["members"]):
+        t = tpl.get(m["template"], {})
+        ids[m["key"]] = db._conn.execute(
+            "INSERT INTO agents(project_id, parent_id, key, sort, name, role, instructions, model, effort, template, "
+            "subagents, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, '', ?, ?, ?, '[]', ?, ?)",
+            (pid, ids.get(m["parent"]), m["key"], i, m["name"], t.get("role", ""), t.get("model") or model,
+             t.get("effort") or effort, m["template"], ts, ts)).lastrowid
+    return ids[group["members"][0]["key"]]
+
+
+def apply_to_project(pid: int, group: dict, model: str, effort: str) -> int:
+    """Replace the agents of project `pid` with the group's team; its tasks move to the new lead and the
+    old agents' own lessons are dropped. Returns the new lead's id."""
+    with db.transaction():
+        db._conn.execute("DELETE FROM learnings WHERE scope = 'self' AND agent_id IN "
+                         "(SELECT id FROM agents WHERE project_id = ?)", (pid,))
+        db._conn.execute("DELETE FROM agents WHERE project_id = ?", (pid,))
+        lead = insert_team(pid, group, model, effort, db.now())
+        db._conn.execute("UPDATE tasks SET assignee_id = ? WHERE project_id = ?", (lead, pid))
+    return lead
 
 
 # ---------------------------------------------------------------- starter groups

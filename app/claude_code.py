@@ -20,7 +20,7 @@ from claude_agent_sdk import (AssistantMessage, ClaudeAgentOptions, ClaudeSDKCli
                               TextBlock, ThinkingBlock, ToolResultBlock, ToolUseBlock, UserMessage,
                               create_sdk_mcp_server, tool)
 
-from . import db, fsops, images, maintenance, team, tools as T
+from . import db, fsops, images, maintenance, project_setup, team, tools as T
 from .agents import CLAUDE_CODE_NOTES, AgentSpec
 from .config import DATA_DIR
 
@@ -142,6 +142,9 @@ def _mcp_tools(run, spec: AgentSpec) -> list:
         return [wrap(defs["update_task"], lambda a: runs._update_task(run, spec.task_id, a)), *team_tools, *site_tools]
     if spec.kind == "dev":
         return [wrap(defs[name], fn) for name, fn in dev_tools.items()]
+    if spec.kind == "setup":
+        return [wrap(d, lambda a, fn=project_setup.HANDLERS[d["name"]]: fn(run, spec, a))
+                for d in spec.tools if d.get("name") in project_setup.HANDLERS]
     return []
 
 
@@ -157,6 +160,8 @@ def _gate(spec: AgentSpec):
             return PermissionResultAllow()
         if spec.kind == "consult" and (name in WRITE_TOOLS or name == "Bash"):
             return PermissionResultDeny(message="You are being consulted: read the repository, do not change it.")
+        if spec.kind == "setup" and (name in WRITE_TOOLS or name == "Bash"):
+            return PermissionResultDeny(message="You set the project up: read the repository, do not change it.")
         if name == "Bash" and not ws.allow_commands:
             return PermissionResultDeny(message="Shell commands are disabled in Agent Group's settings.")
         if name in WRITE_TOOLS:
@@ -192,6 +197,12 @@ def _options(run, spec: AgentSpec, conv: dict, resume: str | None, stderr: deque
                                   system_prompt={"type": "preset", "preset": "claude_code",
                                                  "append": conv["system_prompt"] + CLAUDE_CODE_NOTES["consult"]},
                                   tools=["Read", "Glob", "Grep"])
+    if spec.kind == "setup":
+        return ClaudeAgentOptions(**common, cwd=str(spec.workspace.root), setting_sources=["project"],
+                                  system_prompt={"type": "preset", "preset": "claude_code",
+                                                 "append": conv["system_prompt"] + CLAUDE_CODE_NOTES["setup"]},
+                                  tools=["Read", "Glob", "Grep", "WebFetch", "WebSearch"],
+                                  mcp_servers={"agent": create_sdk_mcp_server("agent", tools=_mcp_tools(run, spec))})
     return ClaudeAgentOptions(
         **common, cwd=str(spec.workspace.root), setting_sources=["project"],
         system_prompt={"type": "preset", "preset": "claude_code",

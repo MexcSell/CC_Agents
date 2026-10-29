@@ -159,6 +159,81 @@ LEAD_TOOLS = [
 # A teammate being consulted reads the repository but does not change it.
 CONSULT_TOOLS = [t for t in FILE_TOOLS if t["name"] in ("list_files", "read_file", "search_files")]
 
+_MEMBER = {"type": "object",
+           "properties": {"key": {"type": "string", "description": "Short handle, unique in the group, e.g. 'backend-dev'."},
+                          "template": {"type": "string", "description": "The member's template symbol, e.g. '@python-developer'."},
+                          "name": {"type": "string", "description": "Display name, e.g. 'Senior Python Developer'."},
+                          "parent": {"type": "string", "description": "Key of the member it reports to. Omit for the lead "
+                                                                      "(exactly one member)."}},
+           "required": ["key", "template"]}
+
+# The setup agent of a new project: analyse it, staff its team, plan its tasks (app/project_setup.py).
+SETUP_TOOLS = [
+    _tool("list_templates",
+          "List the agent templates (reusable agent profiles, referred to as @slug) with their area, language, role "
+          "and expertise. Optionally filter by words that must all appear in a template.",
+          {"query": {"type": "string", "description": "Optional filter words, e.g. 'python' or 'qa'."}},
+          []),
+    _tool("list_groups",
+          "List the agent groups (#slug): hierarchical teams of templates with a lead. Shows each group's members and "
+          "who reports to whom. Optionally filter by words that must all appear in a group.",
+          {"query": {"type": "string", "description": "Optional filter words."}},
+          []),
+    _tool("create_template",
+          "Create a new agent template for a role the project needs and no existing template covers. Returns its "
+          "symbol. Do not duplicate existing templates.",
+          {"name": {"type": "string", "description": "e.g. 'Rust Embedded Developer'."},
+           "slug": {"type": "string", "description": "Optional symbol without '@'; derived from the name if omitted."},
+           "category": {"type": "string", "description": "Library category, like those of the existing templates."},
+           "area": {"type": "string", "description": "Functional area, like the existing templates' (e.g. developer, qa, "
+                                                     "reviewer, lead, manager, devops, designer, writer)."},
+           "language": {"type": "string", "description": "Programming language id if specific to one, e.g. 'rust'."},
+           "description": {"type": "string"},
+           "role": {"type": "string", "description": "One sentence: who the agent is."},
+           "instructions": {"type": "string", "description": "How the agent works."},
+           "rules": {"type": "array", "items": {"type": "string"}},
+           "expertise": {"type": "array", "items": {"type": "string"}},
+           "skills": {"type": "array", "items": {"type": "string"}}},
+          ["name", "description", "role"]),
+    _tool("create_group",
+          "Create a new agent group (a team) when no existing group fits the project. Members are templates; exactly "
+          "one member (the lead) has no parent and receives the project's tasks. Create missing templates first.",
+          {"name": {"type": "string", "description": "e.g. 'Rust Embedded Team'."},
+           "slug": {"type": "string", "description": "Optional symbol without '#'."},
+           "category": {"type": "string"},
+           "description": {"type": "string"},
+           "members": {"type": "array", "items": _MEMBER}},
+          ["name", "description", "members"]),
+    _tool("set_project_team",
+          "Make an agent group the project's team: its members become the project's agents (replacing the current "
+          "ones). Call it once you have chosen or created the group, before creating tasks.",
+          {"group": {"type": "string", "description": "The group's symbol, e.g. '#python-team'."}},
+          ["group"]),
+    _tool("save_project_brief",
+          "Save the consolidated project analysis. It is shown to the user and included in every project agent's "
+          "briefing, so write what the team needs to know: goal and scope, requirements, the repository's current "
+          "state (stack, structure, what exists, what is missing or broken), constraints, risks and open questions. "
+          "Markdown. Calling it again replaces the brief.",
+          {"brief": {"type": "string"}},
+          ["brief"]),
+    _tool("create_tasks",
+          "Create the project's tasks (they are not started). Each task goes to a team member: usually the lead, who "
+          "breaks it down and delegates when the user runs it; a specialist directly for self-contained work. Order "
+          "them in the sequence they should be done.",
+          {"tasks": {"type": "array", "items": {
+              "type": "object",
+              "properties": {"title": {"type": "string"},
+                             "description": {"type": "string", "description": "What to do, context and acceptance criteria."},
+                             "assignee": {"type": "string", "description": "Key (or name) of a team member. Default: the lead."},
+                             "estimated_hours": {"type": "number"},
+                             "next_actions": {"type": "array", "items": {"type": "string"},
+                                              "description": "First concrete steps."}},
+              "required": ["title", "description"]}}},
+          ["tasks"]),
+]
+
+WEB_FETCH_TOOL = {"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 10}
+
 DEV_TOOLS = [
     _tool("restart_server",
           "Restart the Agent Group web server so code changes take effect. A preflight check "

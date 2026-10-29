@@ -148,7 +148,7 @@ def _tokens(model: str, session_start: datetime, week_start: datetime) -> dict:
         "SELECT m.usage, m.created_at, c.kind, a.model AS agent_model FROM messages m "
         "JOIN conversations c ON c.id = m.conversation_id LEFT JOIN tasks t ON t.id = c.task_id "
         "LEFT JOIN agents a ON a.project_id = t.project_id WHERE m.usage IS NOT NULL")
-    fallback = {"chat": settings["chat_model"], "dev": settings["dev_model"]}
+    fallback = {"chat": settings["chat_model"], "dev": settings["dev_model"], "setup": settings["project_model"]}
     zero = lambda: {**{f: 0 for f in TOKEN_FIELDS}, "requests": 0}
     totals = {"session": zero(), "week": zero(), "all": zero()}
     for r in rows:
