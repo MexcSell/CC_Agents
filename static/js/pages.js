@@ -6,8 +6,7 @@ import {
 } from './core.js';
 import { ConversationView } from './conversation.js';
 import { FileExplorer, pickDirectory } from './files.js';
-import { agentTemplateFields } from './templates.js';
-import { applyTemplate, teamTab, knowledgeTab, questionsCard, discussionCard, groupPicker } from './team.js';
+import { teamTab, knowledgeTab, questionsCard, discussionCard, groupPicker } from './team.js';
 
 const runDot = () => h('span', { class: 'dot run', title: 'Agent working' });
 
@@ -425,77 +424,33 @@ function showServerLog() {
 
 // ================================================================ projects
 
-async function registerProjectModal({ template = '', group = '' } = {}) {
-  const [settings, templates, groups] = await Promise.all([api('GET', '/api/settings'), api('GET', '/api/templates'), api('GET', '/api/groups')]);
-  const home = '/home';
+function registerProjectModal() {
   const name = h('input', { type: 'text', placeholder: 'e.g. Website redesign' });
-  const desc = h('textarea', { rows: 3, placeholder: 'Goal and context of the project' });
   const repo = h('input', { type: 'text', class: 'mono', placeholder: '/home/me/my-project' });
   const create = h('input', { type: 'checkbox' });
   const browse = h('button', {
     onclick: async e => {
       e.preventDefault();
-      const picked = await pickDirectory({ title: 'Choose the project repository', start: repo.value.trim() || home, okLabel: 'Use this folder' });
+      const picked = await pickDirectory({ title: 'Choose the project repository', start: repo.value.trim() || '/home', okLabel: 'Use this folder' });
       if (picked) repo.value = picked;
     },
   }, '📁 Browse…');
-  name.addEventListener('input', () => { if (!agentName.dataset.touched) agentName.value = name.value.trim() ? `${name.value.trim()} Agent` : 'Project Agent'; });
-  const agentName = h('input', { type: 'text', value: 'Project Agent' });
-  agentName.addEventListener('input', () => { agentName.dataset.touched = '1'; });
-  const role = h('input', { type: 'text', placeholder: 'e.g. Senior full-stack developer' });
-  const instructions = h('textarea', { rows: 4, placeholder: 'Conventions, constraints and preferences the agent should follow, e.g. "Write tests for every change. Use TypeScript."' });
-  const model = h('select', {}, modelOptions(settings.project_model));
-  const effort = h('select', {}, effortOptions(settings.project_effort));
-  const tpl = agentTemplateFields(templates, { template, onTemplate: t => applyTemplate(t, { role, model, effort }) });
-  applyTemplate(templates.find(t => t.slug === template), { role, model, effort });
-  // A team from an agent group, or a single agent.
-  let mode = template || !groups.length ? 'single' : 'team';
-  const picker = groupPicker(groups, { value: group });
-  const teamModel = h('select', {}, modelOptions(settings.project_model));
-  const teamEffort = h('select', {}, effortOptions(settings.project_effort));
-  const teamSection = h('div', { class: 'form-grid' },
-    field('Agent group', picker.input, 'The whole team is created as the project’s agents. Tasks you add go to its lead, who breaks them down and delegates to the team. You can change the team later.'),
-    picker.preview,
-    h('div', { class: 'form-grid two' },
-      field('Default model', teamModel, 'For agents whose template has no model of its own.'),
-      field('Default effort', teamEffort)));
-  const singleSection = h('div', { class: 'form-grid' },
-    tpl.templateField,
-    h('div', { class: 'form-grid two' }, field('Agent name', agentName), field('Role', role)),
-    field('Instructions', instructions),
-    tpl.subagentsField,
-    h('div', { class: 'form-grid two' }, field('Model', model), field('Effort', effort, 'Higher effort = deeper reasoning, more tokens.')));
-  const modeBtns = h('div', { class: 'seg' });
-  const showMode = () => {
-    teamSection.hidden = mode !== 'team';
-    singleSection.hidden = mode !== 'single';
-    fill(modeBtns, [['team', `👥 Agent group (${groups.length})`], ['single', '🤖 Single agent']].map(([k, label]) =>
-      h('button', { type: 'button', class: mode === k ? 'active' : '', onclick: () => { mode = k; showMode(); } }, label)));
-  };
-  showMode();
+  const details = h('textarea', { rows: 8, placeholder: 'Describe the project in detail — goals, scope, requirements — or enter an address (e.g. https://…)' });
   modal({
     title: 'Register a project',
-    wide: true,
     body: h('div', { class: 'form-grid' },
       field('Project name', name),
-      field('Description', desc),
       h('label', { class: 'field' }, 'Repository folder',
         h('div', { class: 'row' }, repo, browse),
         h('span', { class: 'hint' }, 'The folder the project’s agents work in. Their file tools and commands are confined to it.')),
       h('label', { class: 'check' }, create, 'Create the folder if it does not exist'),
-      h('div', { class: 'row' }, h('h3', { class: 'grow', style: { margin: '6px 0 0' } }, '🤖 Agents'), modeBtns),
-      teamSection,
-      singleSection),
+      field('Project details or address', details)),
     actions: [{
       label: 'Register project', kind: 'primary', onClick: async () => {
         if (!name.value.trim() || !repo.value.trim()) { toast('Name and repository folder are required.', 'error'); return false; }
-        if (mode === 'team' && !picker.group()) { toast('Choose an agent group, or switch to a single agent.', 'error'); return false; }
         try {
           const p = await api('POST', '/api/projects', {
-            name: name.value, description: desc.value, repo_path: repo.value.trim(), create_repo: create.checked,
-            group: mode === 'team' ? picker.get() : '',
-            agent: mode === 'team' ? { name: 'Lead', model: teamModel.value, effort: teamEffort.value }
-              : { name: agentName.value || 'Project Agent', role: role.value, instructions: instructions.value, model: model.value, effort: effort.value, ...tpl.get() },
+            name: name.value, description: details.value, repo_path: repo.value.trim(), create_repo: create.checked,
           });
           toast(`Project "${p.name}" registered`, 'ok');
           go(`#/projects/${p.id}`);
@@ -524,14 +479,14 @@ export async function projectsPage(view, _params, query) {
       h('span', { class: 'grow', style: { textAlign: 'right' } }, `est. ${fmtHours(p.stats.est || 0)}`)));
   page.append(
     h('div', { class: 'page-head' }, h('h1', {}, 'Projects'), h('div', { class: 'spacer' }),
-      h('button', { class: 'primary', onclick: registerProjectModal }, '+ Register project')),
+      h('button', { class: 'primary', onclick: () => registerProjectModal() }, '+ Register project')),
     projects.length ? h('div', { class: 'cards' }, projects.map(card))
       : h('div', { class: 'card empty' }, h('div', { class: 'big' }, '📋'),
-        h('p', {}, 'Register a project with its repository folder and an agent group: the team’s lead breaks your tasks down and its agents carry them out.'),
-        h('button', { class: 'primary', onclick: registerProjectModal }, 'Register your first project')));
+        h('p', {}, 'Register a project with its name, repository folder and details.'),
+        h('button', { class: 'primary', onclick: () => registerProjectModal() }, 'Register your first project')));
   if (query.get('new')) {
     history.replaceState(null, '', '#/projects');
-    registerProjectModal({ template: query.get('template') || '', group: query.get('group') || '' });
+    registerProjectModal();
   }
 }
 

@@ -445,8 +445,7 @@ export async function templatesPage(view, [sub]) {
     t.rules.length ? h('div', { class: 'small muted' }, `📏 ${t.rules.length} rule${t.rules.length === 1 ? '' : 's'}`) : null,
     t.subagents.length ? h('div', { class: 'small' }, '🤝 ', t.subagents.map(s => h('code', { class: 'sym' }, `@${s}`))) : null,
     h('div', { class: 'row small muted', style: { marginTop: 'auto' } },
-      h('span', { class: 'grow' }, t.used_by.length ? `Used ${t.used_by.length}×` : 'Not used yet'),
-      h('a', { href: `#/projects?new=1&template=${t.slug}`, onclick: e => e.stopPropagation() }, 'New project with it →')));
+      h('span', { class: 'grow' }, t.used_by.length ? `Used ${t.used_by.length}×` : 'Not used yet')));
 
   // Categories in the library's order, then the user's own, then templates without one.
   const groups = () => {
@@ -647,8 +646,7 @@ async function groupsView(page) {
     g.description ? h('div', { class: 'small muted' }, g.description) : null,
     tree(g.members),
     h('div', { class: 'row small muted', style: { marginTop: 'auto' } },
-      h('span', { class: 'grow' }, `👥 ${g.members.length} agents`),
-      h('a', { href: `#/projects?new=1&group=${g.slug}`, onclick: e => e.stopPropagation() }, 'New project with this team →')));
+      h('span', { class: 'grow' }, `👥 ${g.members.length} agents`)));
   const matches = g => !query || [g.name, g.symbol, g.description, g.category, ...g.members.flatMap(m => [m.name, m.template])].join(' ').toLowerCase().includes(query);
   const render = () => {
     restoreBtn.hidden = !missing().length;
