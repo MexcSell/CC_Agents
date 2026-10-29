@@ -1,11 +1,144 @@
 // File explorer (tree + editor) and a directory picker, both backed by /api/fs/*.
 
-import { api, h, fill, enc, toast, modal, confirmDialog, promptDialog, contextMenu, fmtBytes, state, resizer } from './core.js';
+import { api, h, fill, enc, toast, modal, confirmDialog, promptDialog, contextMenu, fmtBytes, state, resizer, md } from './core.js';
+import { icon as svgIcon } from './icons.js';
 
 // Ctrl (or Alt, as on macOS) held while dropping copies instead of moving.
 const copyKey = e => e.ctrlKey || e.altKey;
 
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i;
+
+// ---------------------------------------------------------------- file viewer
+
+// Text files with a rendered view besides the source, and binary files the browser can show.
+const TEXT_VIEWS = [
+  [/\.(md|markdown)$/i, 'markdown', 'Markdown'],
+  [/\.json$/i, 'json', 'JSON'],
+  [/\.csv$/i, 'csv', 'CSV'],
+  [/\.tsv$/i, 'tsv', 'TSV'],
+  [/\.html?$/i, 'html', 'HTML'],
+  [/\.svg$/i, 'svg', 'SVG'],
+];
+const MEDIA_VIEWS = [
+  [IMAGE_EXT, 'image', 'Image'],
+  [/\.pdf$/i, 'pdf', 'PDF'],
+  [/\.(mp3|wav|ogg|flac|m4a)$/i, 'audio', 'Audio'],
+  [/\.(mp4|webm|mov|mkv)$/i, 'video', 'Video'],
+];
+const LANGS = {
+  py: 'Python', js: 'JavaScript', mjs: 'JavaScript', ts: 'TypeScript', tsx: 'TSX', jsx: 'JSX', css: 'CSS', sh: 'Shell', bash: 'Shell',
+  yml: 'YAML', yaml: 'YAML', toml: 'TOML', ini: 'INI', xml: 'XML', sql: 'SQL', go: 'Go', rs: 'Rust', java: 'Java', c: 'C', h: 'C',
+  cpp: 'C++', rb: 'Ruby', php: 'PHP', txt: 'Text', log: 'Log',
+};
+const CSV_MAX_ROWS = 2000;
+const JSON_OPEN_NODES = 500;    // nodes the preview builds up front, level by level; deeper levels open on click
+const JSON_MAX_ITEMS = 1000;    // children listed per node
+
+const extOf = path => (/\.([^./]+)$/.exec(path)?.[1] || '').toLowerCase();
+
+function parseJson(text) {
+  try { return JSON.parse(text); } catch (e) { throw new Error(`Invalid JSON: ${e.message}`); }
+}
+
+/**
+ * { kind, label, media } of a file read by /api/fs/read. Media goes by extension (a PDF can look like text), except
+ * SVG text, which has a source; text that parses as a JSON object or array counts as JSON.
+ */
+function fileKind(res) {
+  const svgText = !res.binary && /\.svg$/i.test(res.path);
+  for (const [re, kind, label] of MEDIA_VIEWS) if (!svgText && re.test(res.path)) return { kind, label, media: true };
+  if (res.binary) return { kind: 'binary', label: 'Binary', media: true };
+  for (const [re, kind, label] of TEXT_VIEWS) if (re.test(res.path)) return { kind, label };
+  if (!res.truncated && /^\s*[[{]/.test(res.content)) {
+    try { if (typeof parseJson(res.content) === 'object') return { kind: 'json', label: 'JSON' }; } catch { /* plain text */ }
+  }
+  return { kind: 'text', label: LANGS[extOf(res.path)] || 'Text' };
+}
+
+/**
+ * Rows of CSV/TSV text. With `quotes` (CSV), quoted fields may hold the separator, doubled quotes and line breaks;
+ * TSV has no quoting. Empty lines are skipped.
+ */
+function parseDelimited(text, sep, quotes = sep === ',') {
+  const rows = [];
+  let row = [], field = '', quoted = false, blank = true;   // blank: nothing on the current line yet
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      if (c !== '"') field += c;
+      else if (text[i + 1] === '"') { field += '"'; i++; }
+      else quoted = false;
+    } else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(field);
+      if (!blank) rows.push(row);
+      row = []; field = ''; blank = true;
+      continue;
+    } else if (quotes && c === '"' && field === '') quoted = true;
+    else if (c === sep) { row.push(field); field = ''; }
+    else field += c;
+    blank = false;
+  }
+  if (!blank) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+function csvTable(rows) {
+  const shown = rows.slice(0, CSV_MAX_ROWS + 1);
+  const cols = Math.max(0, ...shown.map(r => r.length));
+  const cells = (r, tag) => Array.from({ length: cols }, (_, i) => {
+    const v = r[i] ?? '';
+    return h(tag, { title: v.length > 40 ? v : null }, v);
+  });
+  const [head = [], ...body] = shown;
+  return h('table', { class: 'fx-table' },
+    h('thead', {}, h('tr', {}, h('th', { class: 'rn' }), cells(head, 'th'))),
+    h('tbody', {}, body.map((r, i) => h('tr', {}, h('td', { class: 'rn' }, i + 1), cells(r, 'td')))));
+}
+
+function jsonValue(v) {
+  if (v === null) return h('span', { class: 'jv-null' }, 'null');
+  if (typeof v === 'string') return h('span', { class: 'jv-str' }, JSON.stringify(v));
+  return h('span', { class: `jv-${typeof v}` }, String(v));
+}
+
+/** Collapsible tree of a parsed JSON value. It opens breadth-first while the JSON_OPEN_NODES budget lasts (the root always). */
+function jsonTree(value) {
+  const queue = [];
+  const root = jsonNode(null, value, queue);
+  let budget = JSON_OPEN_NODES;
+  for (let i = 0; i < queue.length; i++) {
+    if (i && queue[i].size > budget) continue;
+    budget -= queue[i].size;
+    queue[i].expand();
+  }
+  return root;
+}
+
+/** A tree node; its children are built when it is first opened. Containers go into `queue` for jsonTree's expansion. */
+function jsonNode(key, v, queue = null) {
+  const label = key == null ? null
+    : [h('span', { class: typeof key === 'number' ? 'jv-index' : 'jv-key' }, typeof key === 'number' ? key : JSON.stringify(key)), h('span', { class: 'jv-punct' }, ': ')];
+  if (v === null || typeof v !== 'object') return h('div', { class: 'jn' }, label, jsonValue(v));
+  const arr = Array.isArray(v);
+  const keys = arr ? null : Object.keys(v);
+  const count = arr ? v.length : keys.length;
+  const [open, close] = arr ? ['[', ']'] : ['{', '}'];
+  if (!count) return h('div', { class: 'jn' }, label, h('span', { class: 'jv-punct' }, open + close));
+  const kids = h('div', { class: 'jn-kids' });
+  const node = h('details', { class: 'jn' },
+    h('summary', {}, label, h('span', { class: 'jv-punct' }, open),
+      h('span', { class: 'jn-fold' }, ` ${count} ${arr ? (count === 1 ? 'item' : 'items') : (count === 1 ? 'key' : 'keys')} `, h('span', { class: 'jv-punct' }, close))),
+    kids, h('div', { class: 'jv-punct' }, close));
+  const build = (q = null) => {
+    if (kids.childElementCount) return;
+    const shown = arr ? v.slice(0, JSON_MAX_ITEMS).map((x, i) => jsonNode(i, x, q)) : keys.slice(0, JSON_MAX_ITEMS).map(k => jsonNode(k, v[k], q));
+    fill(kids, shown, count > JSON_MAX_ITEMS ? h('div', { class: 'jn muted' }, `… ${count - JSON_MAX_ITEMS} more`) : null);
+  };
+  node.addEventListener('toggle', () => { if (node.open) build(); });
+  queue?.push({ size: Math.min(count, JSON_MAX_ITEMS), expand: () => { build(queue); node.open = true; } });
+  return node;
+}
 
 function parentOf(path) {
   const p = path.replace(/\/+$/, '');
@@ -126,6 +259,10 @@ export class FileExplorer {
       ]);
     });
     this.editor = h('div', { class: 'fx-editor' });
+    // Ctrl+S saves from the source and from the preview.
+    this.editor.addEventListener('keydown', e => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's' && this.textarea) { e.preventDefault(); this.save(); }
+    });
     this.renderEditorPlaceholder();
     const gutter = resizer(this.tree, { key: 'fx-tree', width: 320, min: 180, max: 1200, collapseAt: 0, flex: this.editor });
     fill(this.el, h('div', { class: 'fx' }, toolbar, h('div', { class: 'fx-main' }, this.tree, gutter, this.editor)));
@@ -249,8 +386,8 @@ export class FileExplorer {
       h('span', { class: 'name' }, e.name),
       h('span', { class: 'size' }, e.is_dir ? '' : fmtBytes(e.size)),
       h('span', { class: 'acts' },
-        h('button', { title: 'Rename or move', onclick: ev => { ev.stopPropagation(); this.renameOrMove(e); } }, '✎'),
-        h('button', { title: 'Delete', onclick: ev => { ev.stopPropagation(); this.remove(e); } }, '🗑')));
+        h('button', { title: 'Rename or move', onclick: ev => { ev.stopPropagation(); this.renameOrMove(e); } }, svgIcon('pencil')),
+        h('button', { class: 'del', title: 'Delete', onclick: ev => { ev.stopPropagation(); this.remove(e); } }, svgIcon('trash'))));
     row.addEventListener('click', () => this.activate(e));
     if (e.is_dir) row.addEventListener('dblclick', () => this.go(e.path));
     row.addEventListener('contextmenu', ev => { ev.preventDefault(); this.menu(ev, e); });
@@ -470,50 +607,141 @@ export class FileExplorer {
     const f = this.file;
     fill(this.head,
       f.dirty ? h('span', { class: 'dirty-dot', title: 'Unsaved changes' }, '●') : null,
-      h('span', { class: 'path', title: f.path }, f.path),
+      // <bdi> keeps the leading "/" in place inside the right-to-left box that ellipsizes on the left.
+      h('span', { class: 'path', title: f.path }, h('bdi', {}, f.path)),
+      h('span', { class: 'fx-kind' }, [f.label, f.detail].filter(Boolean).join(' · ')),
       h('span', { class: 'small muted' }, fmtBytes(f.size)),
-      !f.binary && !f.truncated ? h('button', { class: 'sm primary', disabled: !f.dirty, onclick: () => this.save() }, 'Save') : null,
-      h('button', { class: 'sm', title: 'Reload from disk', onclick: () => { if (this.file) { this.file.dirty = false; this.open(this.file.path); } } }, '⟳'),
-      h('button', { class: 'sm', title: 'Download', onclick: () => window.open(`/api/fs/raw?path=${enc(f.path)}&${this.rootQuery()}&download=1`) }, '⤓'),
-      h('button', { class: 'sm', title: 'Close', onclick: () => this.closeFile() }, '✕'));
+      f.canPreview ? h('div', { class: 'seg fx-mode', role: 'group', 'aria-label': 'View' },
+        [['preview', 'Preview'], ['source', 'Source']].map(([mode, label]) => h('button', {
+          type: 'button', class: f.mode === mode ? 'active' : '', 'aria-pressed': String(f.mode === mode), onclick: () => this.setMode(mode, true),
+        }, label))) : null,
+      this.textarea && !f.truncated ? h('button', { class: 'sm primary', disabled: !f.dirty, onclick: () => this.save() }, 'Save') : null,
+      h('button', { class: 'sm icon', title: 'Reload from disk', onclick: () => { if (this.file) { this.file.dirty = false; this.open(this.file.path); } } }, svgIcon('refresh')),
+      h('button', { class: 'sm icon', title: 'Download', onclick: () => window.open(`${this.rawUrl(f.path)}&download=1`) }, svgIcon('download')),
+      h('button', { class: 'sm icon', title: 'Close', onclick: () => this.closeFile() }, svgIcon('x')));
   }
 
+  rawUrl(path) { return `/api/fs/raw?path=${enc(path)}&${this.rootQuery()}`; }
+
   renderEditor(res) {
+    const f = Object.assign(this.file, fileKind(res));
     this.head = h('div', { class: 'fx-editor-head' });
+    this.textarea = null;
     let body;
-    const raw = `/api/fs/raw?path=${enc(res.path)}&${this.rootQuery()}`;
-    if (res.binary) {
-      body = IMAGE_EXT.test(res.path)
-        ? h('div', { class: 'fx-preview' }, h('img', { src: raw, alt: res.path }))
-        : h('div', { class: 'empty' }, h('div', { class: 'big' }, '📦'), 'Binary file — it cannot be edited here.',
-          h('div', {}, h('a', { href: raw + '&download=1' }, 'Download')));
-    } else {
-      const ta = h('textarea', { class: 'code', spellcheck: 'false', value: res.content, readonly: res.truncated });
-      const indent = /^\t/m.test(res.content) ? '\t' : /\.(py|java|kt|rs|go|c|cpp|cs|php)$/.test(res.path) ? '    ' : '  ';
-      ta.addEventListener('input', () => {
-        const dirty = ta.value !== this.file.original;
-        if (dirty !== this.file.dirty) {
-          this.file.dirty = dirty;
-          dirty ? state.dirty.add(this) : state.dirty.delete(this);
-          this.renderEditorHead();
-        }
-      });
-      ta.addEventListener('keydown', e => {
-        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); this.save(); }
-        else if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey) { e.preventDefault(); document.execCommand('insertText', false, indent); }
-      });
-      this.textarea = ta;
-      body = res.truncated
-        ? h('div', { style: { display: 'grid', gridTemplateRows: 'auto 1fr', minHeight: 0 } },
-          h('div', { class: 'notice warn small', style: { borderRadius: 0 } }, 'File is larger than 5 MB: showing the beginning, read-only.'), ta)
-        : ta;
+    if (f.media) body = this.mediaView(f);
+    else {
+      if (f.kind === 'csv' || f.kind === 'tsv') f.detail = this.csvDetail(res.content);
+      f.canPreview = f.kind !== 'text' && !res.truncated;
+      this.note = h('div', { class: 'fx-note' });
+      this.preview = h('div', { class: 'fx-rendered', tabindex: '0', hidden: true });
+      this.source = this.sourceView(res);
+      body = h('div', { class: 'fx-view' }, this.note, this.preview, this.source);
     }
     fill(this.editor, this.head, body);
+    if (f.media) this.renderEditorHead();
+    else this.setMode(f.canPreview && localStorage.getItem(`fx-mode:${extOf(f.path)}`) !== 'source' ? 'preview' : 'source');
+  }
+
+  /** Viewer of a binary file: image, PDF, audio, video, or a download notice. */
+  mediaView(f) {
+    const raw = this.rawUrl(f.path);
+    if (f.kind === 'image') return h('div', { class: 'fx-media' }, this.zoomImage(raw));
+    if (f.kind === 'pdf') return h('iframe', { class: 'fx-frame', src: raw, title: f.path });
+    if (f.kind === 'audio') return h('div', { class: 'fx-media' }, h('audio', { controls: true, preload: 'metadata', src: raw }));
+    if (f.kind === 'video') return h('div', { class: 'fx-media' }, h('video', { controls: true, preload: 'metadata', src: raw }));
+    return h('div', { class: 'empty' }, h('div', { class: 'big' }, '📦'), `Binary file (${fmtBytes(f.size)}) — it cannot be shown here.`,
+      h('div', {}, h('a', { href: raw + '&download=1' }, 'Download')));
+  }
+
+  /** An image fitted to the pane on a checkerboard; clicking toggles 100% size. Its dimensions go into the type label. */
+  zoomImage(src) {
+    const f = this.file;
+    const img = h('img', { src, alt: f.path, title: 'Click to toggle fit / 100%' });
+    img.onload = () => {
+      if (this.file !== f) return;
+      f.detail = `${img.naturalWidth}×${img.naturalHeight}`;
+      this.renderEditorHead();
+    };
+    img.onclick = () => img.parentElement.classList.toggle('actual');
+    return img;
+  }
+
+  /** Editable source with a line-number gutter that follows the textarea's scroll. */
+  sourceView(res) {
+    const ta = h('textarea', { class: 'code', spellcheck: 'false', value: res.content, readOnly: res.truncated });
+    const indent = /^\t/m.test(res.content) ? '\t' : /\.(py|java|kt|rs|go|c|cpp|cs|php)$/.test(res.path) ? '    ' : '  ';
+    const gutter = h('div', { class: 'fx-lines', 'aria-hidden': 'true' });
+    let lines = 0;
+    const number = () => {
+      let n = 1;
+      for (let i = ta.value.indexOf('\n'); i !== -1; i = ta.value.indexOf('\n', i + 1)) n++;
+      if (n !== lines) gutter.textContent = Array.from({ length: (lines = n) }, (_, i) => i + 1).join('\n');
+    };
+    number();
+    ta.addEventListener('scroll', () => { gutter.scrollTop = ta.scrollTop; });
+    ta.addEventListener('input', () => {
+      number();
+      const dirty = ta.value !== this.file.original;
+      if (dirty !== this.file.dirty) {
+        this.file.dirty = dirty;
+        dirty ? state.dirty.add(this) : state.dirty.delete(this);
+        this.renderEditorHead();
+      }
+    });
+    ta.addEventListener('keydown', e => {
+      if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey) { e.preventDefault(); document.execCommand('insertText', false, indent); }
+    });
+    this.textarea = ta;
+    return h('div', { class: 'fx-source' }, gutter, ta);
+  }
+
+  csvDetail(text) {
+    const rows = parseDelimited(text, this.file.kind === 'tsv' ? '\t' : ',');
+    this.csvRows = rows;
+    const n = Math.max(0, rows.length - 1);
+    return `${n.toLocaleString()} ${n === 1 ? 'row' : 'rows'}`;
+  }
+
+  /** Shows the rendered view or the source of a text file; a preview that cannot be rendered falls back to the source. */
+  setMode(mode, remember = false) {
+    const f = this.file;
+    if (remember) localStorage.setItem(`fx-mode:${extOf(f.path)}`, mode);
+    let note = f.truncated ? ['warn', 'File is larger than 5 MB: showing the beginning, read-only.'] : null;
+    if (mode === 'preview') {
+      try { note = this.renderPreview(); }
+      catch (e) { mode = 'source'; note = ['error', `${e.message} — showing the source.`]; }
+    }
+    f.mode = mode;
+    this.preview.hidden = mode !== 'preview';
+    this.source.hidden = mode === 'preview';
+    fill(this.note, note ? h('div', { class: `notice ${note[0]} small` }, note[1]) : null);
     this.renderEditorHead();
+    if (remember) (mode === 'preview' ? this.preview : this.textarea).focus();
+  }
+
+  /** Renders the textarea's current content (HTML and SVG: the saved file) into the preview pane; returns a note or null. */
+  renderPreview() {
+    const f = this.file, text = this.textarea.value;
+    let view, note = null;
+    if (f.kind === 'markdown') view = h('div', { class: 'fx-doc' }, md(text));
+    else if (f.kind === 'json') view = h('div', { class: 'fx-json' }, jsonTree(parseJson(text)));
+    else if (f.kind === 'csv' || f.kind === 'tsv') {
+      f.detail = this.csvDetail(text);
+      const total = Math.max(0, this.csvRows.length - 1);
+      view = csvTable(this.csvRows);
+      if (total > CSV_MAX_ROWS) note = ['info', `Showing the first ${CSV_MAX_ROWS.toLocaleString()} of ${total.toLocaleString()} rows.`];
+    } else {
+      // A fresh URL so a save shows up; the sandbox (no scripts) keeps the page from touching this site.
+      const src = `${this.rawUrl(f.path)}&v=${Date.now()}`;
+      view = f.kind === 'svg' ? h('div', { class: 'fx-media' }, this.zoomImage(src)) : h('iframe', { class: 'fx-frame', sandbox: '', src, title: f.path });
+      if (f.dirty) note = ['info', 'The preview shows the saved file: unsaved edits are not shown.'];
+    }
+    fill(this.preview, view);
+    return note;
   }
 
   async save() {
-    if (!this.file || !this.textarea || !this.file.dirty) return;
+    if (!this.file || !this.textarea || !this.file.dirty || this.file.truncated) return;
     const content = this.textarea.value;
     try {
       const res = await api('POST', '/api/fs/write', { path: this.file.path, content, root: this.root });
@@ -521,7 +749,12 @@ export class FileExplorer {
       this.file.dirty = false;
       this.file.size = res.size;
       state.dirty.delete(this);
-      this.renderEditorHead();
+      // The preview recounts CSV rows itself.
+      if (this.file.mode === 'preview') this.setMode('preview');
+      else {
+        if (this.file.kind === 'csv' || this.file.kind === 'tsv') this.file.detail = this.csvDetail(content);
+        this.renderEditorHead();
+      }
       toast(`Saved ${this.file.path}`, 'ok', 2000);
       this.refresh();
     } catch { /* error already shown */ }

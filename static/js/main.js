@@ -1,6 +1,6 @@
 // Entry point: hash router, server health polling and restart handling.
 
-import { api, h, fill, state, banner, resizer } from './core.js';
+import { api, h, fill, state, banner, resizer, themeSwitch, applyTheme } from './core.js';
 import * as pages from './pages.js';
 import { initUsage, setUsageScope } from './usage.js';
 import { templatesPage } from './templates.js';
@@ -46,7 +46,7 @@ async function route() {
   const query = new URLSearchParams(qs || '');
   const mine = ++token;
   document.querySelectorAll('#sidebar a.nav').forEach(a => a.classList.toggle('active', a.dataset.nav === nav));
-  const devTeam = page === pages.projectsPage && params[0] === 'dev';
+  const devTeam = page === pages.projectsPage && (params[0] === 'dev' || !params[0]);   // #/projects shows the Developer project
   setUsageScope(devTeam && state.info?.dev_project_id ? { scope: 'project', project_id: state.info.dev_project_id }
     : devTeam || page === pages.devPage ? { scope: 'dev' } : nav === 'projects' ? { scope: 'project', project_id: params[0] ? +params[0] : null } : { scope: 'chat' });
 
@@ -145,6 +145,8 @@ async function init() {
   const sidebar = document.getElementById('sidebar');
   sidebar.after(resizer(sidebar, { key: 'sidebar', width: 208, min: 160, max: 360, collapseAt: 130, collapsed: 60, flex: document.getElementById('view') }));
   initUsage();
+  fill(document.getElementById('theme-slot'), themeSwitch());
+  window.addEventListener('storage', e => { if (e.key === 'theme') applyTheme(); });   // changed in another tab
   window.addEventListener('hashchange', route);
   window.addEventListener('beforeunload', e => {
     if (state.dirty.size) { e.preventDefault(); e.returnValue = ''; }

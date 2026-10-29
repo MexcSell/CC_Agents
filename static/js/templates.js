@@ -2,6 +2,7 @@
 // editor and by the project agent forms. A template is referred to by its symbol, "@" + slug.
 
 import { api, h, fill, go, field, toast, modal, confirmDialog, modelOptions, effortOptions } from './core.js';
+import { icon } from './icons.js';
 
 // ================================================================ autocomplete
 
@@ -113,7 +114,7 @@ export function chipInput({ values = [], suggestions, placeholder = '', strict =
 
   const renderChips = () => fill(chips, list.map((v, i) => h('span', { class: 'chip', title: v },
     h('span', { class: 'txt' }, v),
-    h('button', { type: 'button', class: 'x', title: 'Remove', onclick: e => { e.stopPropagation(); list.splice(i, 1); changed(); } }, '✕'))));
+    h('button', { type: 'button', class: 'x', title: 'Remove', onclick: e => { e.stopPropagation(); list.splice(i, 1); changed(); } }, icon('x')))));
   const changed = () => { renderChips(); onChange?.(list); };
   const add = raw => {
     let v = raw.trim().replace(/\s+/g, ' ');
@@ -434,7 +435,7 @@ export async function templatesPage(view, [sub]) {
       h('div', { class: 'grow', style: { minWidth: 0 } }, h('h2', { class: 'ellipsis', style: { margin: 0 } }, t.name), h('code', { class: 'sym' }, t.symbol)),
       h('button', { class: 'ghost icon sm', title: `Copy ${t.symbol}`, onclick: e => { e.stopPropagation(); navigator.clipboard?.writeText(t.symbol).then(() => toast(`${t.symbol} copied`, 'ok')); } }, '⧉'),
       h('button', { class: 'ghost icon sm', title: 'Duplicate', onclick: e => { e.stopPropagation(); edit(t, true); } }, '⎘'),
-      h('button', { class: 'ghost icon sm', title: 'Delete', onclick: e => { e.stopPropagation(); remove(t); } }, '🗑')),
+      h('button', { class: 'ghost icon sm del', title: 'Delete', onclick: e => { e.stopPropagation(); remove(t); } }, icon('trash'))),
     t.area || t.language ? h('div', { class: 'row small', style: { gap: '6px' } },
       t.area && areaOf(t.area) ? h('span', { class: 'badge' }, `${areaOf(t.area).icon} ${areaOf(t.area).name}`) : null,
       t.language ? h('span', { class: 'badge accent' }, langOf(t.language)?.name || t.language) : null) : null,
@@ -570,14 +571,14 @@ function groupModal(group, { templates, onSaved, copy = false }) {
       list.filter(o => !exclude.has(o.m.key)).map(o => h('option', { value: o.m.key, selected: o.m.key === m.parent }, `reports to ${o.m.name || '(unnamed)'}`)));
       return h('div', { class: 'member-row', style: { '--depth': depth } },
         h('span', { class: 'tn-ico' }, depth === 0 ? '👑' : '🤖'), nameInput, tplInput, parent,
-        h('button', { type: 'button', class: 'ghost icon sm', title: 'Add a member reporting to this one', onclick: () => { members.push({ key: newKey(), template: '', name: '', parent: m.key }); render(); } }, '+'),
+        h('button', { type: 'button', class: 'ghost icon sm', title: 'Add a member reporting to this one', onclick: () => { members.push({ key: newKey(), template: '', name: '', parent: m.key }); render(); } }, icon('plus')),
         h('button', {
-          type: 'button', class: 'ghost icon sm', title: 'Remove', onclick: () => {
+          type: 'button', class: 'ghost icon sm del', title: 'Remove', onclick: () => {
             members = members.filter(x => x !== m);
             members.forEach(x => { if (x.parent === m.key) x.parent = m.parent; });
             render();
           },
-        }, '✕'));
+        }, icon('trash')));
     }) : h('div', { class: 'small muted' }, 'No members yet. Add the lead first.'));
   };
   render();
@@ -642,7 +643,7 @@ async function groupsView(page) {
     h('div', { class: 'row' },
       h('div', { class: 'grow', style: { minWidth: 0 } }, h('h2', { class: 'ellipsis', style: { margin: 0 } }, g.name), h('code', { class: 'sym' }, g.symbol)),
       h('button', { class: 'ghost icon sm', title: 'Duplicate', onclick: e => { e.stopPropagation(); edit(g, true); } }, '⎘'),
-      h('button', { class: 'ghost icon sm', title: 'Delete', onclick: e => { e.stopPropagation(); remove(g); } }, '🗑')),
+      h('button', { class: 'ghost icon sm del', title: 'Delete', onclick: e => { e.stopPropagation(); remove(g); } }, icon('trash'))),
     g.description ? h('div', { class: 'small muted' }, g.description) : null,
     tree(g.members),
     h('div', { class: 'row small muted', style: { marginTop: 'auto' } },

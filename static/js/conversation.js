@@ -1,6 +1,7 @@
 // Conversation view: renders stored messages and follows a live agent run over Server-Sent Events.
 
 import { api, h, fill, md, renderMarkdown, enhanceMarkdown, addParagraphCopy, fmtBytes, fmtDate, state, banner, toast } from './core.js';
+import { icon } from './icons.js';
 
 // Attached images: the types and limits app/images.py accepts.
 export const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
@@ -194,7 +195,7 @@ export class ConversationView {
   renderTray() {
     fill(this.tray, this.attachments.map((src, i) => h('div', { class: 'thumb' },
       h('img', { src, alt: 'Attached image', onclick: () => viewImage(src) }),
-      h('button', { class: 'remove', title: 'Remove image', onclick: () => { this.attachments.splice(i, 1); this.renderTray(); } }, '×'))));
+      h('button', { class: 'remove', title: 'Remove image', onclick: () => { this.attachments.splice(i, 1); this.renderTray(); } }, icon('x')))));
     this.tray.hidden = !this.attachments.length;
   }
 

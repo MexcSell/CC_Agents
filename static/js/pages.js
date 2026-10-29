@@ -2,8 +2,9 @@
 
 import {
   api, h, fill, enc, go, field, state, projectBase, toast, modal, banner, confirmDialog, promptDialog, contextMenu, md, resizer,
-  fmtDate, timeAgo, fmtDuration, fmtHours, statusBadge, progressBar, STATUS_LABELS, modelOptions, effortOptions,
+  fmtDate, timeAgo, fmtDuration, fmtHours, statusBadge, progressBar, STATUS_LABELS, modelOptions, effortOptions, themeSwitch,
 } from './core.js';
+import { icon } from './icons.js';
 import { ConversationView, prepareImage, viewImage, IMAGE_TYPES, MAX_IMAGES } from './conversation.js';
 import { FileExplorer, pickDirectory } from './files.js';
 import { teamTab, knowledgeTab, questionsCard, discussionCard, deleteProject } from './team.js';
@@ -197,7 +198,7 @@ export async function chatPage(view, params) {
             h('div', { class: 'small muted' }, `${timeAgo(c.updated_at)} · ${c.message_count} messages`)),
           h('div', { class: 'actions' },
             h('a', { class: 'btn ghost icon sm', title: 'Export as Markdown', href: `/api/conversations/${c.id}/export`, onclick: e => e.stopPropagation() }, '⤓'),
-            h('button', { class: 'ghost icon sm', title: 'Delete', onclick: e => { e.stopPropagation(); deleteConv(c); } }, '🗑'))))
+            h('button', { class: 'ghost icon sm del', title: 'Delete', onclick: e => { e.stopPropagation(); deleteConv(c); } }, icon('trash')))))
         : h('div', { class: 'empty small' }, 'No conversations yet. Write a message to start one.')));
   };
 
@@ -205,7 +206,7 @@ export async function chatPage(view, params) {
   const convActions = [
     h('button', { class: 'sm ghost', title: 'Rename', onclick: renameConv }, '✎'),
     h('button', { class: 'sm ghost', title: 'Export as Markdown', onclick: () => { location.href = `/api/conversations/${convId}/export`; } }, '⤓'),
-    h('button', { class: 'sm ghost danger', title: 'Delete conversation', onclick: () => deleteConv(convs.find(c => c.id === convId) || { id: convId, title: 'this conversation' }) }, '🗑'),
+    h('button', { class: 'sm ghost del', title: 'Delete conversation', onclick: () => deleteConv(convs.find(c => c.id === convId) || { id: convId, title: 'this conversation' }) }, icon('trash')),
   ];
   const convOpts = () => ({
     convId,
@@ -309,13 +310,13 @@ export async function devPage(view, [convParam]) {
         h('div', { class: 'actions' },
           h('button', { class: 'ghost icon sm', title: 'Rename session', onclick: e => { e.stopPropagation(); renameSession(s); } }, '✎'),
           h('button', {
-            class: 'ghost icon sm', title: 'Delete session', onclick: async e => {
+            class: 'ghost icon sm del', title: 'Delete session', onclick: async e => {
               e.stopPropagation();
               if (!await confirmDialog(`Delete the session "${s.title}"?`, { okLabel: 'Delete', danger: true })) return;
               await api('DELETE', `/api/conversations/${s.id}`);
               if (s.id === convId) go('#/dev'); else refresh();
             },
-          }, '🗑'))))
+          }, icon('trash')))))
       : h('div', { class: 'empty small' }, 'No sessions yet.')));
   renderList();
 
@@ -408,7 +409,7 @@ async function renderServerPanel(pane) {
         snaps.length ? h('div', {}, snaps.map(s => h('div', { class: 'snap' },
           h('span', { class: 'grow ellipsis mono', title: `${s.name} · ${fmtDate(s.created)}` }, s.name.replace('.tar.gz', '')),
           h('button', { class: 'sm', onclick: () => restore(s) }, 'Restore'),
-          h('button', { class: 'sm ghost', title: 'Delete', onclick: () => removeSnap(s) }, '🗑'))))
+          h('button', { class: 'sm ghost del', title: 'Delete', onclick: () => removeSnap(s) }, icon('trash')))))
           : h('div', { class: 'small muted' }, 'No snapshots yet.'))));
 }
 
@@ -461,11 +462,11 @@ function registerProjectModal() {
   setTimeout(() => name.focus(), 30);
 }
 
-/** The project list on the left, the overview or the selected project on the right. Routes:
- *  #/projects (overview), #/projects/:id[/tab[/task]] and #/dev/team[/tab[/task]] (params[0] is 'dev'). */
+/** The project list on the left, the selected project on the right. Routes: #/projects/:id[/tab[/task]],
+ *  #/dev/team[/tab[/task]] (params[0] is 'dev') and #/projects, which shows the Developer project under #/dev/team. */
 export async function projectsPage(view, params, query) {
   let projects = await api('GET', '/api/projects');
-  let key;              // what the main pane shows: a project id, 'dev' or null for the overview
+  let key;              // what the main pane shows: a project id or 'dev'
   let shownPid = null;  // id of the project on screen
   let content = null;   // { dispose, update } of the main pane's content
   const listPane = h('div', { class: 'pane' });
@@ -478,11 +479,13 @@ export async function projectsPage(view, params, query) {
     projects = await api('GET', '/api/projects', undefined, { quiet: true });
     renderList();
   };
-  // Deleting the project on screen (or any from the overview) rebuilds the page; otherwise the list refreshes.
+  // Deleting the project on screen returns to the Developer project; otherwise the list refreshes.
   const remove = async p => {
     if (!await deleteProject(p)) return;
-    if (key === null || p.id === shownPid) go('#/projects'); else refresh().catch(() => {});
+    if (p.id === shownPid) go('#/projects'); else refresh().catch(() => {});
   };
+  // Selecting the project on screen again keeps it as it is (go() would rebuild the page for the same address).
+  const open = href => { if (location.hash !== href) go(href); };
   const renderList = () => refill(listPane,
     h('div', { class: 'pane-head' }, paneTitle('📋', 'Projects'),
       newBtn('Register project', () => registerProjectModal())),
@@ -490,24 +493,30 @@ export async function projectsPage(view, params, query) {
       ? projects.map(p => {
         const dev = p.system === 'dev';
         const busy = p.running || p.setup?.running;
-        return h('div', { class: `list-item${dev ? ' dev-project' : ''}${(dev ? key === 'dev' : p.id === key) ? ' active' : ''}`, onclick: () => go(dev ? '#/dev/team' : `#/projects/${p.id}`) },
+        return h('div', { class: `list-item${dev ? ' dev-project' : ''}${(dev ? key === 'dev' : p.id === key) ? ' active' : ''}`, onclick: () => open(dev ? '#/dev/team' : `#/projects/${p.id}`) },
           dev ? h('span', { class: 'li-ico', title: p.name }, '🛠', busy ? runDot() : null) : itemIcon(p.name, busy),
           h('div', { class: 'grow' },
             h('div', { class: 'title ellipsis' }, busy ? runDot() : null, p.name,
               p.open_questions ? h('span', { class: 'badge review', title: 'Questions for you' }, `❓ ${p.open_questions}`) : null),
             h('div', { class: 'small muted ellipsis' }, `${p.stats.done}/${p.stats.total} tasks · ${p.agent_count} agent${p.agent_count === 1 ? '' : 's'}`)),
           dev ? null : h('div', { class: 'actions' },
-            h('button', { class: 'ghost icon sm', title: 'Delete project', onclick: e => { e.stopPropagation(); remove(p); } }, '🗑')));
+            h('button', { class: 'ghost icon sm del', title: 'Delete project', onclick: e => { e.stopPropagation(); remove(p); } }, icon('trash'))));
       })
       : h('div', { class: 'empty small' }, 'No projects yet. Register one to begin.')));
 
-  // Show the route's project (or the overview). Selecting a task of the project on screen updates it in place;
+  // Show the route's project. Selecting a task of the project on screen updates it in place;
   // anything else is built on top of the old content, which is swapped out when it has loaded.
   let seq = 0;
   let first = true;   // the list was just loaded
   const show = async ([pidParam, tab, taskParam], q) => {
     const mine = ++seq;
-    const next = pidParam === 'dev' ? 'dev' : pidParam ? +pidParam : null;
+    // #/projects opens the Developer project's tasks; ?new=1 (the Dashboard's button) opens the register dialog over it.
+    if (!pidParam) {
+      history.replaceState(null, '', '#/dev/team');
+      if (q?.get('new')) registerProjectModal();
+      pidParam = 'dev';
+    }
+    const next = pidParam === 'dev' ? 'dev' : +pidParam;
     if (next === key && content?.update) {
       try {
         if (await content.update([String(shownPid), tab, taskParam]) !== false) { refresh().catch(() => {}); return; }
@@ -518,7 +527,7 @@ export async function projectsPage(view, params, query) {
     content = null;
     key = next;
     renderList();
-    const listed = first ? null : refresh().catch(() => {});
+    if (!first) refresh().catch(() => {});
     first = false;
     const old = [...mainPane.children];
     const host = h('div', { class: old.length ? 'pane-swap loading' : 'pane-swap' });
@@ -527,11 +536,7 @@ export async function projectsPage(view, params, query) {
     const timer = setTimeout(() => mine === seq && reveal(), 400);
     try {
       let res;
-      if (key === null) {
-        shownPid = null;
-        await listed;
-        res = projectsOverview(host, projects, q, remove);
-      } else if (key === 'dev') {
+      if (key === 'dev') {
         const { project } = await api('GET', '/api/devteam');   // the built-in Developer project, always there
         if (state.info) state.info.dev_project_id = project.id;
         shownPid = project.id;
@@ -560,42 +565,6 @@ export async function projectsPage(view, params, query) {
   };
 }
 
-/** The projects overview: a card per project. */
-function projectsOverview(view, projects, query, remove) {
-  const page = h('div', { class: 'page' });
-  view.append(page);
-  // The built-in Developer project opens under #/dev/team and cannot be deleted.
-  const card = p => h('div', { class: 'card project-card', onclick: () => go(p.system === 'dev' ? '#/dev/team' : `#/projects/${p.id}`) },
-    h('div', { class: 'row' }, h('h2', { class: 'grow ellipsis', style: { margin: 0 } }, p.system === 'dev' ? `🛠 ${p.name}` : p.name),
-      p.setup?.running ? h('span', { class: 'badge accent' }, runDot(), 'setting up') : null,
-      p.running ? h('span', { class: 'badge accent' }, runDot(), `${p.running} running`) : null,
-      p.system === 'dev' ? h('span', { class: 'badge', title: 'The development team of this website. Built in, cannot be deleted.' }, 'built-in') : h('button', {
-        class: 'ghost icon sm danger', title: 'Delete project',
-        onclick: e => { e.stopPropagation(); remove(p); },
-      }, '🗑')),
-    p.description ? h('div', { class: 'muted small', style: { display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' } }, p.description) : null,
-    h('div', { class: 'path' }, '📁 ', p.repo_path, p.repo_exists ? '' : '  ⚠ missing'),
-    h('div', { class: 'row small', style: { gap: '6px', flexWrap: 'wrap' } }, '👑 ', h('b', {}, p.agent?.name || '—'), p.agent?.template ? h('code', { class: 'sym' }, `@${p.agent.template}`) : null,
-      h('span', { class: 'muted' }, `· 👥 ${p.agent_count} agent${p.agent_count === 1 ? '' : 's'}`),
-      p.open_questions ? h('span', { class: 'badge review', title: 'Questions for you' }, `❓ ${p.open_questions}`) : null),
-    progressBar(Math.round(p.stats.avg_progress || 0), p.stats.total > 0 && p.stats.done === p.stats.total),
-    h('div', { class: 'row small muted' },
-      h('span', {}, `${p.stats.done}/${p.stats.total} tasks done`),
-      h('span', {}, `${p.stats.active} in progress`),
-      h('span', { class: 'grow', style: { textAlign: 'right' } }, `est. ${fmtHours(p.stats.est || 0)}`)));
-  page.append(
-    h('div', { class: 'page-head' }, h('h1', {}, 'Projects'), h('div', { class: 'spacer' }),
-      h('button', { class: 'primary', onclick: () => registerProjectModal() }, '+ Register project')),
-    projects.length ? h('div', { class: 'cards' }, projects.map(card))
-      : h('div', { class: 'card empty' }, h('div', { class: 'big' }, '📋'),
-        h('p', {}, 'Register a project with its name, repository folder and details. A setup agent analyses it, puts together its agent team and plans its tasks.'),
-        h('button', { class: 'primary', onclick: () => registerProjectModal() }, 'Register your first project')));
-  if (query?.get('new')) {
-    history.replaceState(null, '', '#/projects');
-    registerProjectModal();
-  }
-}
-
 async function projectPage(view, [pidParam, tab = 'tasks', taskParam], query = null, loaded = null) {
   const pid = +pidParam;
   if (tab === 'agent') tab = 'team';
@@ -617,7 +586,7 @@ async function projectPage(view, [pidParam, tab = 'tasks', taskParam], query = n
       project.setup?.running ? h('a', { class: 'badge accent', href: `${base}/tasks`, title: 'The setup agent is analysing the project, staffing its team and planning its tasks' }, runDot(), 'Setting up') : null,
       h('div', { class: 'spacer' }),
       h('a', { class: 'mono small', href: `${base}/files`, title: 'Open the repository' }, `📁 ${project.repo_path}`),
-      dev ? null : h('button', { class: 'ghost sm', title: 'Delete this project', onclick: async () => { if (await deleteProject(project)) go('#/projects'); } }, '🗑 Delete')),
+      dev ? null : h('button', { class: 'ghost sm del', title: 'Delete this project', onclick: async () => { if (await deleteProject(project)) go('#/projects'); } }, icon('trash'), 'Delete')),
     project.repo_exists ? null : h('div', { class: 'notice warn', style: { marginBottom: '10px' } }, `The repository folder ${project.repo_path} does not exist. Fix it under "Team & settings".`),
     project.description ? h('div', { class: 'muted', style: { marginBottom: '10px' } }, project.description) : null,
     h('div', { class: 'tabs' }, tabs.map(([key, label]) =>
@@ -688,7 +657,7 @@ function taskImagesInput(textarea, task = null) {
   const tray = h('div', { class: 'attachments', hidden: true });
   const thumb = (src, onRemove) => h('div', { class: 'thumb' },
     h('img', { src, alt: 'Attached image', onclick: () => viewImage(src) }),
-    h('button', { class: 'remove', title: 'Remove image', onclick: onRemove }, '×'));
+    h('button', { class: 'remove', title: 'Remove image', onclick: onRemove }, icon('x')));
   const render = () => {
     fill(tray,
       stored.filter(im => !removed.has(im.name)).map(im => thumb(taskImageUrl(task.id, im.name), () => { removed.add(im.name); render(); })),
@@ -793,7 +762,7 @@ async function tasksTab(el, project, taskId, reloadProject) {
   let rootId = null;  // the top-level task of the task on screen (a sub-task's tree stays highlighted)
   const item = t => h('div', { class: `card task-item${t.id === taskId || t.id === rootId ? ' active' : ''}`, onclick: () => go(`${projectBase(project.id)}/tasks/${t.id}`) },
     h('div', { class: 'row' }, h('b', { class: 'grow ellipsis' }, t.title), t.open_questions ? h('span', { class: 'badge review', title: 'Questions for you' }, `❓ ${t.open_questions}`) : null, t.running || t.team_running ? runDot() : null,
-      h('button', { class: 'ghost icon sm danger', title: 'Delete task', onclick: e => { e.stopPropagation(); removeTask(t); } }, '🗑')),
+      h('button', { class: 'ghost icon sm del', title: 'Delete task', onclick: e => { e.stopPropagation(); removeTask(t); } }, icon('trash'))),
     h('div', { class: 'row small muted' }, statusBadge(t.status), h('span', {}, `#${t.id}`), h('span', {}, `est. ${fmtHours(t.estimated_hours)}`), h('span', { class: 'grow', style: { textAlign: 'right' } }, `${t.progress}%`)),
     progressBar(t.progress, t.status === 'done'),
     h('div', { class: 'row small muted' },
@@ -1046,7 +1015,7 @@ class TaskDetail {
         assignee,
         statusBadge(t.status),
         h('button', { class: 'sm', onclick: () => this.edit() }, '✎ Edit'),
-        h('button', { class: 'sm danger', title: 'Delete task', onclick: () => this.remove() }, '🗑')),
+        h('button', { class: 'sm del', title: 'Delete task', onclick: () => this.remove() }, icon('trash'))),
       h('div', { class: 'task-metrics' },
         metric('Status', statusSel),
         metric('Progress', h('div', { class: 'row' }, progress, h('span', { class: 'muted' }, '%')), progressBar(t.progress, t.status === 'done')),
@@ -1078,7 +1047,7 @@ class TaskDetail {
           t.insights.length ? h('ul', { class: 'item-list' }, t.insights.map((it, i) => h('li', {},
             h('span', { title: it.source === 'agent' ? 'From the agent' : 'From you' }, it.source === 'agent' ? '🤖' : '👤'),
             h('span', { class: 'txt' }, it.text, h('div', { class: 'small muted' }, timeAgo(it.at))),
-            h('button', { class: 'ghost sm', title: 'Remove', onclick: () => this.save({ insights: t.insights.filter((_, j) => j !== i) }) }, '✕'))))
+            h('button', { class: 'ghost icon sm del', title: 'Remove', onclick: () => this.save({ insights: t.insights.filter((_, j) => j !== i) }) }, icon('trash')))))
             : h('div', { class: 'small muted' }, 'Ideas and insights that emerge during the work show up here.'),
           addRow('Add an idea or insight…', text => this.save({ insights: [...t.insights, { text, source: 'user' }] }))),
         h('div', { class: 'card pad-sm' },
@@ -1086,7 +1055,7 @@ class TaskDetail {
           t.next_actions.length ? h('ul', { class: 'item-list' }, t.next_actions.map((a, i) => h('li', { class: a.done ? 'done' : '' },
             h('input', { type: 'checkbox', checked: a.done, onchange: e => this.save({ next_actions: t.next_actions.map((x, j) => (j === i ? { ...x, done: e.target.checked } : x)) }) }),
             h('span', { class: 'txt' }, a.text),
-            h('button', { class: 'ghost sm', title: 'Remove', onclick: () => this.save({ next_actions: t.next_actions.filter((_, j) => j !== i) }) }, '✕'))))
+            h('button', { class: 'ghost icon sm del', title: 'Remove', onclick: () => this.save({ next_actions: t.next_actions.filter((_, j) => j !== i) }) }, icon('trash')))))
             : h('div', { class: 'small muted' }, 'No upcoming action items.'),
           addRow('Add an action item…', text => this.save({ next_actions: [...t.next_actions, { text, done: false }] })))),
       h('details', { class: 'card pad-sm' },
@@ -1136,7 +1105,7 @@ export async function filesPage(view, _params, query) {
       h('div', { class: 'spacer' }),
       h('button', { class: 'sm', onclick: () => jump(info.home) }, '🏠 Home'),
       h('button', { class: 'sm', onclick: () => jump('/') }, '/ Root'),
-      h('button', { class: 'sm', onclick: () => jump(info.app_root) }, '◆ Agent Group'),
+      h('button', { class: 'sm', onclick: () => jump(info.app_root) }, '🛠 Agent Group'),
       projects.slice(0, 6).map(p => h('button', { class: 'sm', title: p.repo_path, onclick: () => jump(p.repo_path) }, `📋 ${p.name}`))),
     host));
   fx = new FileExplorer(host, {
@@ -1192,6 +1161,12 @@ export async function settingsPage(view) {
   view.append(h('div', { class: 'page', style: { maxWidth: '820px' } },
     h('div', { class: 'page-head' }, h('h1', {}, 'Settings')),
     h('div', { class: 'stack' },
+      h('div', { class: 'card form-grid' },
+        h('h2', { style: { margin: 0 } }, 'Appearance'),
+        // Not field(): a <label> would forward clicks on its text to the first button.
+        h('div', { class: 'field' }, 'Theme', h('div', {}, themeSwitch({ labels: true })),
+          h('span', { class: 'hint' }, 'System follows the light or dark setting of your operating system. '
+            + 'Applies right away and is remembered in this browser; the switch at the bottom of the sidebar does the same.'))),
       h('div', { class: 'card form-grid' },
         h('h2', { style: { margin: 0 } }, 'Engine'),
         field('Agents run on', fields.engine, 'Claude Code uses the Claude login on this server. Usage counts against your plan’s limits, '

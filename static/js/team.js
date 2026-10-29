@@ -4,6 +4,7 @@
 import { api, h, fill, go, field, state, projectBase, toast, modal, confirmDialog, md, timeAgo, fmtDate, modelOptions, effortOptions } from './core.js';
 import { autocomplete, rankMatches, agentTemplateFields } from './templates.js';
 import { pickDirectory } from './files.js';
+import { icon } from './icons.js';
 
 // Fills an agent form from a chosen template: its role when the role is still empty, its default model
 // and effort, and its name when `name` is given and still untouched.
@@ -31,8 +32,8 @@ export function teamTree(agents, { onEdit, onAdd, onRemove, compact = false } = 
       a.template ? h('code', { class: 'sym' }, `@${a.template}`) : null),
     !compact && a.role ? h('div', { class: 'small muted ellipsis' }, a.role) : null),
   compact ? null : h('span', { class: 'small muted', style: { whiteSpace: 'nowrap' } }, `${modelLabel(a.model)} · ${a.effort}`),
-  onAdd ? h('button', { class: 'ghost icon sm', title: `Add an agent reporting to ${a.name}`, onclick: e => { e.stopPropagation(); onAdd(a); } }, '+') : null,
-  onRemove && a.depth > 0 ? h('button', { class: 'ghost icon sm', title: 'Remove from the team', onclick: e => { e.stopPropagation(); onRemove(a); } }, '🗑') : null)));
+  onAdd ? h('button', { class: 'ghost icon sm', title: `Add an agent reporting to ${a.name}`, onclick: e => { e.stopPropagation(); onAdd(a); } }, icon('plus')) : null,
+  onRemove && a.depth > 0 ? h('button', { class: 'ghost icon sm del', title: 'Remove from the team', onclick: e => { e.stopPropagation(); onRemove(a); } }, icon('trash')) : null)));
 }
 
 /** Add (agent null) or edit an agent of a project team. */
@@ -181,7 +182,7 @@ export async function teamTab(el, project, onSaved) {
         h('div', { class: 'small muted' }, 'Removes the project, its team, tasks, agent logs and the team’s lessons from Agent Group. Files in the repository are not touched.'),
         h('div', {}, h('button', {
           class: 'danger', onclick: async () => { if (await deleteProject(project)) go('#/projects'); },
-        }, '🗑 Delete project'))))));
+        }, icon('trash'), 'Delete project'))))));
   renderTree();
 }
 
@@ -306,7 +307,7 @@ export async function knowledgeTab(el, project) {
         h('h3', {}, title, h('span', { class: 'small muted', style: { fontWeight: 400 } }, ` · ${about}`)),
         h('ul', { class: 'item-list' }, list.map(r => h('li', {},
           h('span', { class: 'txt' }, r.text, h('div', { class: 'small muted' }, `${r.author === 'user' ? '👤 you' : `🤖 ${r.author}`}${r.task_id ? ` · task #${r.task_id}` : ''} · ${timeAgo(r.created_at)}${r.scope === 'role' && byAgent[r.agent_id] === undefined && r.project_id !== project.id ? ' · from another project' : ''}`)),
-          h('button', { class: 'ghost sm', title: 'Delete', onclick: () => remove(r) }, '✕'))))))
+          h('button', { class: 'ghost icon sm del', title: 'Delete', onclick: () => remove(r) }, icon('trash')))))))
         : h('div', { class: 'card empty small' }, 'No lessons yet. They accumulate as the team works on tasks.'));
   };
   await render();

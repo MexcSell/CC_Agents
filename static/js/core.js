@@ -1,5 +1,7 @@
 // Shared helpers: API client, DOM builder, dialogs, formatting and a small Markdown renderer.
 
+import { icon } from './icons.js';
+
 export const state = {
   pid: null,
   info: null,
@@ -184,6 +186,46 @@ export function resizer(target, { key, width, min = 180, max = 520, collapseAt =
     gutter.addEventListener('pointercancel', end);
   });
   return gutter;
+}
+
+// ---------------------------------------------------------------- theme
+
+const THEMES = [['light', 'sun', 'Light'], ['system', 'monitor', 'System'], ['dark', 'moon', 'Dark']];
+
+/** The saved colour theme: 'system' (follows the OS), 'light' or 'dark'. */
+export function getTheme() {
+  const t = localStorage.getItem('theme');
+  return t === 'light' || t === 'dark' ? t : 'system';
+}
+
+/** Save and apply a theme; every theme switch on screen follows. index.html applies it before first paint. */
+export function setTheme(t) {
+  if (t === 'system') localStorage.removeItem('theme'); else localStorage.setItem('theme', t);
+  // Switch every colour at once instead of letting the hover transitions fade some of them.
+  const root = document.documentElement;
+  root.classList.add('no-transitions');
+  applyTheme();
+  requestAnimationFrame(() => requestAnimationFrame(() => root.classList.remove('no-transitions')));
+}
+
+export function applyTheme() {
+  const t = getTheme();
+  if (t === 'system') delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = t;
+  document.querySelectorAll('.theme-switch button').forEach(b => {
+    b.classList.toggle('active', b.dataset.theme === t);
+    b.setAttribute('aria-pressed', String(b.dataset.theme === t));
+  });
+}
+
+/** A segmented Light / System / Dark switch; `labels` shows the names next to the icons. */
+export function themeSwitch({ labels = false } = {}) {
+  const cur = getTheme();
+  return h('div', { class: `seg theme-switch${labels ? ' labels' : ''}`, role: 'group', 'aria-label': 'Colour theme' },
+    THEMES.map(([t, ico, label]) => h('button', {
+      type: 'button', class: t === cur ? 'active' : '', title: label, 'data-theme': t, 'aria-pressed': String(t === cur),
+      onclick: () => setTheme(t),
+    }, icon(ico), labels ? h('span', {}, label) : null)));
 }
 
 export function toast(message, kind = 'info', ms = 4500) {
