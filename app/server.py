@@ -989,6 +989,7 @@ class TaskIn(BaseModel):
     estimated_hours: float | None = None
     next_actions: list[str] = []
     assignee_id: int | None = None    # default: the project's lead
+    images: list[str] = []            # base64 image data of the description, optionally as data: URLs
 
 
 class TaskPatch(BaseModel):
@@ -1002,6 +1003,8 @@ class TaskPatch(BaseModel):
     insights: list[dict] | None = None
     next_actions: list[dict] | None = None
     assignee_id: int | None = None
+    add_images: list[str] | None = None      # base64 image data, optionally as data: URLs
+    remove_images: list[str] | None = None   # names of stored images
 
 
 class TaskRunIn(BaseModel):
@@ -1067,11 +1070,14 @@ def create_task(pid: int, body: TaskIn):
     title = body.title.strip() or team.title_from(body.description)
     if not title:
         raise HTTPException(400, "A title or a description is required")
+    files = images.task_check([], body.images)
     ts = db.now()
     actions = json.dumps([{"text": a, "done": False} for a in body.next_actions if a.strip()])
     tid = db.execute("INSERT INTO tasks(project_id, assignee_id, title, description, estimated_hours, next_actions, "
                      "created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
                      (pid, assignee_id, title, body.description, body.estimated_hours, actions, ts, ts))
+    if files:
+        db.update_task(tid, {"images": images.task_save(tid, files)})
     name = db.get_agent(assignee_id)["name"]
     db.add_task_event(tid, "user", f"Task created and assigned to {name}")
     return _with_runtime(db.get_task(tid))
@@ -1110,7 +1116,8 @@ def task_discussion(tid: int):
 @app.put("/api/tasks/{tid}")
 def update_task(tid: int, body: TaskPatch):
     task = _task_or_404(tid)
-    fields = body.model_dump(exclude_none=True, exclude={"clear_estimate", "assignee_id"})
+    fields = body.model_dump(exclude_none=True, exclude={"clear_estimate", "assignee_id", "add_images",
+                                                          "remove_images"})
     if "status" in fields and fields["status"] not in TASK_STATUSES:
         raise HTTPException(400, f"status must be one of {sorted(TASK_STATUSES)}")
     if "progress" in fields:
@@ -1123,8 +1130,15 @@ def update_task(tid: int, body: TaskPatch):
     if "next_actions" in fields:
         fields["next_actions"] = [{"text": str(a.get("text", "")), "done": bool(a.get("done"))}
                                   for a in fields["next_actions"] if a.get("text")]
-    if body.assignee_id is not None and body.assignee_id != task["assignee_id"]:
-        aid = _check_assignee(task["project_id"], body.assignee_id)
+    reassign = body.assignee_id is not None and body.assignee_id != task["assignee_id"]
+    aid = _check_assignee(task["project_id"], body.assignee_id) if reassign else None
+    removed = set(body.remove_images or [])
+    files = images.task_check(task["images"], body.add_images or [], removed)
+    # Validation is done: from here on the image files change
+    if files or removed:
+        images.task_delete(tid, [i["name"] for i in task["images"] if i["name"] in removed])
+        fields["images"] = [i for i in task["images"] if i["name"] not in removed] + images.task_save(tid, files)
+    if reassign:
         db.execute("UPDATE tasks SET assignee_id = ? WHERE id = ?", (aid, tid))
         db.add_task_event(tid, "user", f"Reassigned to {db.get_agent(aid)['name']}")
     updated = db.update_task(tid, fields)
@@ -1140,7 +1154,16 @@ def delete_task(tid: int):
     tree = _subtree(tid)
     _cancel_conversations(f"SELECT id FROM conversations WHERE task_id IN ({','.join('?' * len(tree))})", tree)
     db.execute("DELETE FROM tasks WHERE id = ?", (tid,))
+    for t in tree:
+        images.task_remove(t)
     return {"ok": True}
+
+
+@app.get("/api/tasks/{tid}/images/{name}")
+def get_task_image(tid: int, name: str):
+    _task_or_404(tid)
+    p = images.task_path(tid, name) or not_found("Image not found")
+    return FileResponse(p, headers={"Cache-Control": "private, max-age=31536000, immutable"})
 
 
 @app.post("/api/tasks/{tid}/run")
@@ -1234,6 +1257,10 @@ class FsMove(BaseModel):
     overwrite: bool = False
 
 
+class FsCopy(FsMove):
+    rename_if_exists: bool = False
+
+
 @app.post("/api/fs/write")
 def fs_write(body: FsWrite):
     return fsops.write_file(fsops.confine(_root(body.root), body.path), body.content, body.create_only)
@@ -1255,6 +1282,13 @@ def fs_delete(body: FsPath):
 def fs_move(body: FsMove):
     r = _root(body.root)
     return fsops.move(fsops.confine(r, body.source), fsops.confine(r, body.destination), r, body.overwrite)
+
+
+@app.post("/api/fs/copy")
+def fs_copy(body: FsCopy):
+    r = _root(body.root)
+    return fsops.copy(fsops.confine(r, body.source), fsops.confine(r, body.destination), r, body.overwrite,
+                      body.rename_if_exists)
 
 
 # ---------------------------------------------------------------- static frontend

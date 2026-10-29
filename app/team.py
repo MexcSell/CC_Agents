@@ -164,14 +164,20 @@ def start_task(tid: int, message: str = "", images: list[str] | None = None, sen
     if conv is None or conv["options"].get("agent_id", agent["id"]) != agent["id"]:
         conv = db.create_conversation("task", f"Task #{tid}: {task['title']}", agents.task_system_prompt(project, agent),
                                       task_id=tid, options={"agent_id": agent["id"]})
-        content = agents.task_kickoff_message(project, agent, task, note)
+        attached = img.task_to_conversation(task, conv["id"])   # the description's images
+        content = agents.task_kickoff_message(project, agent, task, note, len(attached))
     else:
-        content = agents.task_followup_message(project, agent, task, note, conv)
-    if images:
-        content = img.save(conv["id"], images) + [{"type": "text", "text": content}]
+        # Images added to the description since they were last sent
+        attached = img.task_to_conversation(task, conv["id"], conv["options"].get("task_images", []))
+        content = agents.task_followup_message(project, agent, task, note, conv, len(attached))
+    if images or attached:
+        content = attached + img.save(conv["id"], images or []) + [{"type": "text", "text": content}]
     if task["status"] == "todo":
         db.update_task(tid, {"status": "in_progress"})
     run = runs.start(conv["id"], "task", conv["title"], content, agents.task_spec(project, agent, tid), task_id=tid)
+    if attached:
+        sent = conv["options"].get("task_images", []) + [b["upload"].split("/", 1)[1] for b in attached]
+        db.update_conversation_options(conv["id"], {"task_images": sent})
     by = sender["name"] if sender else "user"
     db.add_task_event(tid, "agent" if sender else "user",
                       f"{agent['name']} started" + (f" by {by}" if sender else "") +

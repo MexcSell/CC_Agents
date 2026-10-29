@@ -346,8 +346,11 @@ def task_record_text(task: dict, project: dict | None = None) -> str:
     return text
 
 
-def task_kickoff_message(project: dict, agent: dict, task: dict, note: str) -> str:
+def task_kickoff_message(project: dict, agent: dict, task: dict, note: str, images: int = 0) -> str:
+    """`images`: the number of task description images sent with the message."""
     parts = [f"Task #{task['id']}: {task['title']}", task["description"].strip() or "(no description)"]
+    if images:
+        parts.append(f"{images} image(s) attached to the task description are included with this message.")
     if task["parent_id"]:
         parent = db.get_task(task["parent_id"])
         if parent:
@@ -361,8 +364,11 @@ def task_kickoff_message(project: dict, agent: dict, task: dict, note: str) -> s
     return "\n\n".join(parts)
 
 
-def task_followup_message(project: dict, agent: dict, task: dict, note: str, conv: dict) -> str:
+def task_followup_message(project: dict, agent: dict, task: dict, note: str, conv: dict, images: int = 0) -> str:
+    """`images`: the number of task description images added since the last message, sent with this one."""
     parts = [note.strip() or "Continue working on the task."]
+    if images:
+        parts.append(f"{images} image(s) newly attached to the task description are included with this message.")
     parts.append(task_record_text(task, project) + "\n(The user or your lead may have edited this record since "
                                                    "your last turn.)")
     if task_system_prompt(project, agent) != conv["system_prompt"]:

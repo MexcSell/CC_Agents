@@ -146,6 +146,8 @@ def move(src: Path, dst: Path, root: Path, overwrite: bool = False) -> dict:
     if dst.exists():
         if not overwrite:
             raise FsError(f"Destination already exists: {dst}")
+        if src.resolve().is_relative_to(dst.resolve()):
+            raise FsError("The destination contains the source")
         _guard_destructive(dst, root)
         if dst.is_dir() and not dst.is_symlink():
             shutil.rmtree(dst)
@@ -153,6 +155,57 @@ def move(src: Path, dst: Path, root: Path, overwrite: bool = False) -> dict:
             dst.unlink()
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(src), str(dst))
+    return entry(dst)
+
+
+def _free_name(p: Path) -> Path:
+    """`stem (copy).ext`, then `stem (copy 2).ext`, ... (folders: `name (copy)`): the first that does not exist."""
+    stem, suffix = (p.name, "") if p.is_dir() else (p.stem, p.suffix)
+    n = 1
+    while True:
+        candidate = p.with_name(f"{stem} (copy{'' if n == 1 else f' {n}'}){suffix}")
+        if not candidate.exists() and not candidate.is_symlink():
+            return candidate
+        n += 1
+
+
+def copy(src: Path, dst: Path, root: Path, overwrite: bool = False, rename_if_exists: bool = False) -> dict:
+    """Copy a file or directory (recursively). If `dst` is an existing directory (or a link to one), the copy
+    goes inside it."""
+    if not src.exists() and not src.is_symlink():
+        raise FsError(f"No such file or directory: {src}")
+    if dst.is_dir():   # confine() checked where a link points
+        dst = dst / src.name
+    is_dir = src.is_dir() and not src.is_symlink()
+    if is_dir and dst.resolve().is_relative_to(src.resolve()) and not dst.resolve() == src.resolve():
+        raise FsError("Cannot copy a directory inside itself")
+    if dst.exists() or dst.is_symlink():
+        if rename_if_exists:
+            dst = _free_name(dst)
+        elif not overwrite:
+            raise FsError(f"Destination already exists: {dst}")
+        elif dst.resolve() == src.resolve():
+            raise FsError("Source and destination are the same")
+        elif src.resolve().is_relative_to(dst.resolve()):
+            raise FsError("The destination contains the source")
+        else:
+            _guard_destructive(dst, root)
+            if dst.is_dir() and not dst.is_symlink():
+                shutil.rmtree(dst)
+            else:
+                dst.unlink()
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if is_dir:
+            shutil.copytree(src, dst, symlinks=True)
+        else:
+            shutil.copy2(src, dst, follow_symlinks=False)
+    except shutil.Error as e:   # copytree collects the errors of single files: (src, dst, reason)
+        errors = e.args[0] if e.args and isinstance(e.args[0], list) else []
+        raise FsError(f"{len(errors) or 'Some'} file(s) could not be copied"
+                      + (f", e.g. {errors[0][2]}" if errors else ""))
+    except OSError as e:
+        raise FsError(f"Copy failed: {e.strerror or e}: {e.filename or dst}")
     return entry(dst)
 
 

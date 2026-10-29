@@ -4,7 +4,7 @@ import {
   api, h, fill, enc, go, field, state, projectBase, toast, modal, banner, confirmDialog, promptDialog, contextMenu, md, resizer,
   fmtDate, timeAgo, fmtDuration, fmtHours, statusBadge, progressBar, STATUS_LABELS, modelOptions, effortOptions,
 } from './core.js';
-import { ConversationView } from './conversation.js';
+import { ConversationView, prepareImage, viewImage, IMAGE_TYPES, MAX_IMAGES } from './conversation.js';
 import { FileExplorer, pickDirectory } from './files.js';
 import { teamTab, knowledgeTab, questionsCard, discussionCard, deleteProject } from './team.js';
 
@@ -635,7 +635,12 @@ async function projectPage(view, [pidParam, tab = 'tasks', taskParam], query = n
     if (!project.repo_exists) { body.append(h('div', { class: 'empty' }, 'The repository folder does not exist.')); return; }
     const host = h('div', { style: { height: 'calc(100vh - 210px)', minHeight: '420px' } });
     body.append(host);
-    const fx = new FileExplorer(host, { root: project.repo_path, start: project.repo_path });
+    // Reopen the folder last shown for this project if it is still inside the repository.
+    const storageKey = `fx-last-path:${project.id}`;
+    const repo = project.repo_path.replace(/\/+$/, '') || '/';
+    const saved = localStorage.getItem(storageKey);
+    const start = saved && (saved === repo || saved.startsWith(repo === '/' ? '/' : repo + '/')) ? saved : project.repo_path;
+    const fx = new FileExplorer(host, { root: project.repo_path, start, fallbacks: [project.repo_path], storageKey });
     return () => fx.dispose();
   }
   if (tab === 'team') {
@@ -668,9 +673,74 @@ function devSwitch(active) {
       h('button', { class: active === key ? 'active' : '', onclick: () => go(href) }, label))));
 }
 
+const taskImageUrl = (taskId, name) => `/api/tasks/${taskId}/images/${enc(name)}`;
+
+/**
+ * Images of a task description: 📎 button, or paste / drop images onto the description textarea.
+ * With a task, its stored images are shown too and can be removed.
+ * Returns { el, added() -> [data: URL], removed() -> [name] }; both wait for images still being read.
+ */
+function taskImagesInput(textarea, task = null) {
+  const stored = task?.images || [];
+  const removed = new Set();
+  const added = [];
+  let pending = Promise.resolve();
+  const tray = h('div', { class: 'attachments', hidden: true });
+  const thumb = (src, onRemove) => h('div', { class: 'thumb' },
+    h('img', { src, alt: 'Attached image', onclick: () => viewImage(src) }),
+    h('button', { class: 'remove', title: 'Remove image', onclick: onRemove }, '×'));
+  const render = () => {
+    fill(tray,
+      stored.filter(im => !removed.has(im.name)).map(im => thumb(taskImageUrl(task.id, im.name), () => { removed.add(im.name); render(); })),
+      added.map((src, i) => thumb(src, () => { added.splice(i, 1); render(); })));
+    tray.hidden = !tray.children.length;
+  };
+  const addImages = files => (pending = pending.then(async () => {
+    for (const file of files) {
+      if (!IMAGE_TYPES.includes(file.type)) { toast(`${file.name}: only PNG, JPEG, GIF and WebP images can be attached.`, 'error'); continue; }
+      if (stored.length - removed.size + added.length >= MAX_IMAGES) { toast(`At most ${MAX_IMAGES} images per task.`, 'error'); break; }
+      try {
+        added.push(await prepareImage(file));
+      } catch {
+        toast(`${file.name} could not be read or is too large.`, 'error');
+      }
+      render();
+    }
+  }));
+  const fileInput = h('input', {
+    type: 'file', accept: IMAGE_TYPES.join(','), multiple: true, hidden: true,
+    onchange: e => { addImages([...e.target.files]); e.target.value = ''; },
+  });
+  // Pasted images are attached; any text on the clipboard is pasted as usual.
+  textarea.addEventListener('paste', e => {
+    const files = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith('image/'));
+    if (files.length) addImages(files);
+  });
+  const hasFiles = e => e.dataTransfer?.types.includes('Files');
+  textarea.addEventListener('dragover', e => { if (hasFiles(e)) { e.preventDefault(); textarea.classList.add('dropping'); } });
+  textarea.addEventListener('dragleave', () => textarea.classList.remove('dropping'));
+  textarea.addEventListener('drop', e => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    textarea.classList.remove('dropping');
+    addImages([...e.dataTransfer.files]);
+  });
+  render();
+  return {
+    el: h('div', { class: 'task-images' },
+      h('div', { class: 'row' }, fileInput,
+        h('button', { class: 'sm', title: `Attach up to ${MAX_IMAGES} images`, onclick: () => fileInput.click() }, '📎 Attach images'),
+        h('span', { class: 'small muted' }, 'or paste / drop them onto the description')),
+      tray),
+    added: async () => { await pending; return [...added]; },
+    removed: async () => { await pending; return [...removed]; },
+  };
+}
+
 function newTaskModal(project, onCreated) {
   const title = h('input', { type: 'text', placeholder: 'Optional — taken from the description if empty' });
   const desc = h('textarea', { rows: 5, placeholder: 'What should be done? Acceptance criteria, links, constraints…' });
+  const images = taskImagesInput(desc);
   const est = h('input', { type: 'number', min: 0, step: 0.25, placeholder: 'Let the agent estimate' });
   const actions = h('textarea', { rows: 3, placeholder: 'Optional: initial action items, one per line' });
   const start = h('input', { type: 'checkbox', checked: true });
@@ -679,16 +749,17 @@ function newTaskModal(project, onCreated) {
   modal({
     title: 'New task',
     wide: true,
-    body: h('div', { class: 'form-grid' }, field('Title', title), field('Description', desc),
+    body: h('div', { class: 'form-grid' }, field('Title', title), field('Description', desc), images.el,
       team ? field('Assign to', assignee, `${project.agent.name} (the lead) breaks the task down and delegates the parts to the team. Assign it to someone else to have them do it directly.`) : null,
       h('div', { class: 'form-grid two' }, field('Estimated total time (hours)', est), field('Upcoming action items', actions)),
       h('label', { class: 'check' }, start, 'Start working on it right away')),
     actions: [{
       label: 'Create task', kind: 'primary', onClick: async () => {
+        const added = await images.added();
         if (!title.value.trim() && !desc.value.trim()) { toast('Enter a title or a description.', 'error'); return false; }
         try {
           const task = await api('POST', `/api/projects/${project.id}/tasks`, {
-            title: title.value, description: desc.value,
+            title: title.value, description: desc.value, images: added,
             estimated_hours: est.value === '' ? null : +est.value,
             next_actions: actions.value.split('\n').map(s => s.trim()).filter(Boolean),
             assignee_id: +assignee.value,
@@ -918,7 +989,7 @@ class TaskDetail {
     try {
       await api('PUT', `/api/tasks/${this.id}`, fields);
       await this.reload();
-    } catch { this.render(); }
+    } catch { this.render(); return false; }
   }
 
   render() {
@@ -978,7 +1049,11 @@ class TaskDetail {
           progressBar(x.progress, x.status === 'done'))))) : null,
       h('details', { class: 'card pad-sm', open: !t.summary || undefined },
         h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, 'Description'),
-        h('div', { style: { marginTop: '8px' } }, t.description ? md(t.description) : h('span', { class: 'muted' }, 'No description.'))),
+        h('div', { style: { marginTop: '8px' } }, t.description ? md(t.description) : t.images?.length ? null : h('span', { class: 'muted' }, 'No description.')),
+        t.images?.length ? h('div', { class: 'msg-images task-images-view' }, t.images.map(im => {
+          const src = taskImageUrl(t.id, im.name);
+          return h('img', { src, alt: im.name, title: im.name, loading: 'lazy', onclick: () => viewImage(src) });
+        })) : null),
       h('div', { class: 'two-col' },
         h('div', { class: 'card pad-sm' },
           h('h3', {}, '💡 Ideas & insights'),
@@ -1006,10 +1081,14 @@ class TaskDetail {
   edit() {
     const title = h('input', { type: 'text', value: this.task.title });
     const desc = h('textarea', { rows: 8, value: this.task.description });
+    const images = taskImagesInput(desc, this.task);
     modal({
       title: 'Edit task', wide: true,
-      body: h('div', { class: 'form-grid' }, field('Title', title), field('Description', desc, 'The agent sees the updated record on its next run.')),
-      actions: [{ label: 'Save', kind: 'primary', onClick: () => this.save({ title: title.value, description: desc.value }) }],
+      body: h('div', { class: 'form-grid' }, field('Title', title), field('Description', desc, 'The agent sees the updated record on its next run.'), images.el),
+      actions: [{ label: 'Save', kind: 'primary', onClick: async () => {
+        const [add_images, remove_images] = [await images.added(), await images.removed()];
+        return this.save({ title: title.value, description: desc.value, ...(add_images.length ? { add_images } : {}), ...(remove_images.length ? { remove_images } : {}) });
+      } }],
     });
   }
 
@@ -1027,7 +1106,7 @@ class TaskDetail {
 
 export async function filesPage(view, _params, query) {
   const info = state.info || await api('GET', '/api/system/info');
-  const start = query.get('path') || info.home || '/';
+  const start = query.get('path') || localStorage.getItem('fx-last-path') || '/home';
   const projects = await api('GET', '/api/projects', undefined, { quiet: true }).catch(() => []);
   const host = h('div', { style: { flex: 1, minHeight: 0 } });
   let fx;
@@ -1035,14 +1114,16 @@ export async function filesPage(view, _params, query) {
   view.append(h('div', { class: 'page', style: { maxWidth: 'none', height: '100%', display: 'flex', flexDirection: 'column' } },
     h('div', { class: 'page-head' },
       h('h1', {}, 'Files'),
-      h('span', { class: 'muted small' }, 'The whole file system: create, open, edit, move and delete files'),
+      h('span', { class: 'muted small' }, 'The whole file system: create, open, edit, copy, move and delete files'),
       h('div', { class: 'spacer' }),
       h('button', { class: 'sm', onclick: () => jump(info.home) }, '🏠 Home'),
       h('button', { class: 'sm', onclick: () => jump('/') }, '/ Root'),
       h('button', { class: 'sm', onclick: () => jump(info.app_root) }, '◆ Agent Group'),
       projects.slice(0, 6).map(p => h('button', { class: 'sm', title: p.repo_path, onclick: () => jump(p.repo_path) }, `📋 ${p.name}`))),
     host));
-  fx = new FileExplorer(host, { root: '/', start, onNavigate: p => history.replaceState(null, '', `#/files?path=${enc(p)}`) });
+  fx = new FileExplorer(host, {
+    root: '/', start, fallbacks: ['/home', '/'], storageKey: 'fx-last-path', onNavigate: p => history.replaceState(null, '', `#/files?path=${enc(p)}`),
+  });
   return () => fx.dispose();
 }
 

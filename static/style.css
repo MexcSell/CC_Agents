@@ -262,6 +262,9 @@ body.resizing { cursor: col-resize; user-select: none; }
 .msg-images { display: flex; flex-wrap: wrap; gap: 6px; }
 .msg-images:not(:last-child) { margin-bottom: 8px; }
 .msg-images img { max-width: 180px; max-height: 140px; border-radius: 8px; border: 1px solid var(--border); cursor: zoom-in; display: block; object-fit: contain; background: var(--panel); }
+.task-images .attachments { margin: 8px 0 0; max-width: none; }
+.task-images-view { margin-top: 10px; }
+textarea.dropping { box-shadow: 0 0 0 2px var(--accent); background: var(--accent-soft); }
 .lightbox { cursor: zoom-out; }
 .lightbox img { max-width: 100%; max-height: calc(100vh - 32px); border-radius: 8px; box-shadow: var(--shadow); background: var(--panel); }
 
@@ -316,6 +319,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 .fx-node { display: flex; align-items: center; gap: 4px; padding: 3px 8px; cursor: pointer; white-space: nowrap; font-size: 13px; user-select: none; }
 .fx-node:hover { background: var(--hover); }
 .fx-node.selected { background: var(--accent-soft); }
+.fx-node.match { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
 .fx-node.drop { outline: 2px dashed var(--accent); outline-offset: -2px; }
 .fx-node .caret { width: 14px; color: var(--muted); font-size: 10px; text-align: center; flex: none; }
 .fx-node .ico { width: 18px; text-align: center; flex: none; }

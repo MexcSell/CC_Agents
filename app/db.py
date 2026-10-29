@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     summary TEXT NOT NULL DEFAULT '',
     parent_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
     assignee_id INTEGER,
+    images TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -192,6 +193,8 @@ with _lock:
         _conn.execute("ALTER TABLE tasks ADD COLUMN parent_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE")
     if "assignee_id" not in task_cols:
         _conn.execute("ALTER TABLE tasks ADD COLUMN assignee_id INTEGER")
+    if "images" not in task_cols:   # JSON list of {name, media_type}: images of the description (app/images.py)
+        _conn.execute("ALTER TABLE tasks ADD COLUMN images TEXT NOT NULL DEFAULT '[]'")
     # Projects used to have exactly one agent (UNIQUE project_id). Rebuild the table as a team table;
     # each existing agent becomes its project's lead.
     if any(ix["unique"] and ix["origin"] == "u" for ix in _conn.execute("PRAGMA index_list(agents)")):
@@ -353,24 +356,23 @@ def update_conversation_options(cid: int, patch: dict) -> dict:
 
 # ---------------------------------------------------------------- tasks
 
-def get_task(tid: int) -> dict | None:
-    row = one("SELECT * FROM tasks WHERE id = ?", (tid,))
+def _task_row(row: dict | None) -> dict | None:
     if row:
-        row["insights"] = json.loads(row["insights"])
-        row["next_actions"] = json.loads(row["next_actions"])
+        for key in ("insights", "next_actions", "images"):
+            row[key] = json.loads(row[key])
     return row
 
 
+def get_task(tid: int) -> dict | None:
+    return _task_row(one("SELECT * FROM tasks WHERE id = ?", (tid,)))
+
+
 def list_tasks(project_id: int) -> list[dict]:
-    rows = query("SELECT * FROM tasks WHERE project_id = ? ORDER BY id DESC", (project_id,))
-    for r in rows:
-        r["insights"] = json.loads(r["insights"])
-        r["next_actions"] = json.loads(r["next_actions"])
-    return rows
+    return [_task_row(r) for r in query("SELECT * FROM tasks WHERE project_id = ? ORDER BY id DESC", (project_id,))]
 
 
 TASK_FIELDS = ("title", "description", "status", "progress", "estimated_hours", "summary",
-               "insights", "next_actions", "time_spent_seconds")
+               "insights", "next_actions", "time_spent_seconds", "images")
 
 
 def update_task(tid: int, fields: dict) -> dict:
@@ -378,7 +380,7 @@ def update_task(tid: int, fields: dict) -> dict:
     for key in TASK_FIELDS:
         if key in fields:
             value = fields[key]
-            if key in ("insights", "next_actions"):
+            if key in ("insights", "next_actions", "images"):
                 value = json.dumps(value, ensure_ascii=False)
             sets.append(f"{key} = ?")
             params.append(value)

@@ -3,8 +3,8 @@
 import { api, h, fill, md, renderMarkdown, enhanceMarkdown, addParagraphCopy, fmtBytes, fmtDate, state, banner, toast } from './core.js';
 
 // Attached images: the types and limits app/images.py accepts.
-const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
-const MAX_IMAGES = 8;
+export const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+export const MAX_IMAGES = 8;
 const MAX_IMAGE_BYTES = 3_750_000;
 const MAX_IMAGE_EDGE = 2000;   // long edge of an image that has to be re-encoded to fit MAX_IMAGE_BYTES
 
@@ -16,7 +16,7 @@ const toDataUrl = blob => new Promise((resolve, reject) => {
 });
 
 /** The image as a data: URL, downscaled and re-encoded only when it is too large to send as is. */
-async function prepareImage(file) {
+export async function prepareImage(file) {
   const bitmap = await createImageBitmap(file);
   if (file.size <= MAX_IMAGE_BYTES && Math.max(bitmap.width, bitmap.height) <= 8000) return toDataUrl(file);
   const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(bitmap.width, bitmap.height));
@@ -34,11 +34,12 @@ async function prepareImage(file) {
   return toDataUrl(blob);
 }
 
-function viewImage(src) {
-  const close = () => { el.remove(); document.removeEventListener('keydown', onKey); };
-  const onKey = e => { if (e.key === 'Escape') close(); };
+export function viewImage(src) {
+  const close = () => { el.remove(); document.removeEventListener('keydown', onKey, true); };
+  // Escape closes only the lightbox, not a dialog underneath it.
+  const onKey = e => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
   const el = h('div', { class: 'modal-backdrop lightbox', title: 'Close', onclick: close }, h('img', { src, alt: 'Attached image' }));
-  document.addEventListener('keydown', onKey);
+  document.addEventListener('keydown', onKey, true);
   document.body.append(el);
 }
 
