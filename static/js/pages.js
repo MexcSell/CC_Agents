@@ -6,7 +6,7 @@ import {
 } from './core.js';
 import { ConversationView } from './conversation.js';
 import { FileExplorer, pickDirectory } from './files.js';
-import { teamTab, knowledgeTab, questionsCard, discussionCard, groupPicker } from './team.js';
+import { teamTab, knowledgeTab, questionsCard, discussionCard, groupPicker, deleteProject } from './team.js';
 
 const runDot = () => h('span', { class: 'dot run', title: 'Agent working' });
 
@@ -468,7 +468,11 @@ export async function projectsPage(view, _params, query) {
   const card = p => h('div', { class: 'card project-card', onclick: () => go(`#/projects/${p.id}`) },
     h('div', { class: 'row' }, h('h2', { class: 'grow ellipsis', style: { margin: 0 } }, p.name),
       p.setup?.running ? h('span', { class: 'badge accent' }, runDot(), 'setting up') : null,
-      p.running ? h('span', { class: 'badge accent' }, runDot(), `${p.running} running`) : null),
+      p.running ? h('span', { class: 'badge accent' }, runDot(), `${p.running} running`) : null,
+      h('button', {
+        class: 'ghost icon sm', title: 'Delete project',
+        onclick: async e => { e.stopPropagation(); if (await deleteProject(p)) go('#/projects'); },
+      }, '🗑')),
     p.description ? h('div', { class: 'muted small', style: { display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' } }, p.description) : null,
     h('div', { class: 'path' }, '📁 ', p.repo_path, p.repo_exists ? '' : '  ⚠ missing'),
     h('div', { class: 'row small', style: { gap: '6px', flexWrap: 'wrap' } }, '👑 ', h('b', {}, p.agent?.name || '—'), p.agent?.template ? h('code', { class: 'sym' }, `@${p.agent.template}`) : null,
@@ -512,7 +516,8 @@ export async function projectPage(view, [pidParam, tab = 'tasks', taskParam], qu
       h('a', { class: 'badge', href: `${base}/team`, title: project.agents.map(a => `${'  '.repeat(a.depth)}${a.name}`).join('\n') }, `👥 ${project.agents.length} agent${project.agents.length === 1 ? '' : 's'}`),
       project.setup?.running ? h('a', { class: 'badge accent', href: `${base}/tasks`, title: 'The setup agent is analysing the project, staffing its team and planning its tasks' }, runDot(), 'Setting up') : null,
       h('div', { class: 'spacer' }),
-      h('a', { class: 'mono small', href: `${base}/files`, title: 'Open the repository' }, `📁 ${project.repo_path}`)),
+      h('a', { class: 'mono small', href: `${base}/files`, title: 'Open the repository' }, `📁 ${project.repo_path}`),
+      dev ? null : h('button', { class: 'ghost sm', title: 'Delete this project', onclick: async () => { if (await deleteProject(project)) go('#/projects'); } }, '🗑 Delete')),
     project.repo_exists ? null : h('div', { class: 'notice warn', style: { marginBottom: '10px' } }, `The repository folder ${project.repo_path} does not exist. Fix it under "Team & settings".`),
     project.description ? h('div', { class: 'muted', style: { marginBottom: '10px' } }, project.description) : null,
     h('div', { class: 'tabs' }, tabs.map(([key, label]) =>

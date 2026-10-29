@@ -177,20 +177,27 @@ export async function teamTab(el, project, onSaved) {
           },
         }, dev ? 'Save' : 'Save project'))),
       h('div', { class: 'card stack' },
-        h('h2', { style: { margin: 0 } }, dev ? 'Disband the team' : 'Unregister project'),
+        h('h2', { style: { margin: 0 } }, dev ? 'Disband the team' : 'Delete project'),
         h('div', { class: 'small muted' }, dev ? 'Removes the development team, its tasks, agent logs and the team’s lessons. The website’s source code is not touched; you can set up a new team afterwards.'
           : 'Removes the project, its team, tasks, agent logs and the team’s lessons from Agent Group. Files in the repository are not touched.'),
         h('div', {}, h('button', {
-          class: 'danger', onclick: async () => {
-            if (!await confirmDialog(dev ? 'Disband the development team? Its tasks and agent logs are deleted; the source code stays.'
-              : `Unregister "${project.name}"? Its tasks and agent logs are deleted; the repository files stay.`, { okLabel: dev ? 'Disband' : 'Unregister', danger: true })) return;
-            await api('DELETE', `/api/projects/${project.id}`);
-            toast(dev ? 'Development team disbanded' : 'Project unregistered', 'ok');
-            if (dev && state.info) state.info.dev_project_id = null;
-            go(dev ? '#/dev/team' : '#/projects');
-          },
-        }, dev ? 'Disband the team' : 'Unregister project'))))));
+          class: 'danger', onclick: async () => { if (await deleteProject(project)) go(dev ? '#/dev/team' : '#/projects'); },
+        }, dev ? 'Disband the team' : '🗑 Delete project'))))));
   renderTree();
+}
+
+/** Ask for confirmation, then delete the project (stopping its running agents). Returns true when deleted.
+ *  Files in the repository are never touched. */
+export async function deleteProject(project) {
+  const dev = project.system === 'dev';
+  const running = project.running || project.setup?.running ? '\n\nAgents working on it are stopped.' : '';
+  if (!await confirmDialog(dev ? `Disband the development team? Its tasks and agent logs are deleted; the source code stays.${running}`
+    : `Delete the project "${project.name}"?\n\nIts team, tasks, agent logs and lessons are removed from Agent Group. The files in ${project.repo_path} stay.${running}`,
+  { okLabel: dev ? 'Disband' : 'Delete', danger: true })) return false;
+  await api('DELETE', `/api/projects/${project.id}`);
+  toast(dev ? 'Development team disbanded' : `Project "${project.name}" deleted`, 'ok');
+  if (dev && state.info) state.info.dev_project_id = null;
+  return true;
 }
 
 // ================================================================ questions
