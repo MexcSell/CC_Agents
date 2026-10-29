@@ -468,7 +468,11 @@ export async function projectsPage(view, _params, query) {
   const card = p => h('div', { class: 'card project-card', onclick: () => go(`#/projects/${p.id}`) },
     h('div', { class: 'row' }, h('h2', { class: 'grow ellipsis', style: { margin: 0 } }, p.name),
       p.setup?.running ? h('span', { class: 'badge accent' }, runDot(), 'setting up') : null,
-      p.running ? h('span', { class: 'badge accent' }, runDot(), `${p.running} running`) : null),
+      p.running ? h('span', { class: 'badge accent' }, runDot(), `${p.running} running`) : null,
+      h('button', {
+        class: 'ghost icon sm danger', title: 'Delete project',
+        onclick: async e => { e.stopPropagation(); if (await deleteProject(p)) go('#/projects'); },
+      }, '🗑')),
     p.description ? h('div', { class: 'muted small', style: { display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' } }, p.description) : null,
     h('div', { class: 'path' }, '📁 ', p.repo_path, p.repo_exists ? '' : '  ⚠ missing'),
     h('div', { class: 'row small', style: { gap: '6px', flexWrap: 'wrap' } }, '👑 ', h('b', {}, p.agent?.name || '—'), p.agent?.template ? h('code', { class: 'sym' }, `@${p.agent.template}`) : null,
@@ -478,12 +482,7 @@ export async function projectsPage(view, _params, query) {
     h('div', { class: 'row small muted' },
       h('span', {}, `${p.stats.done}/${p.stats.total} tasks done`),
       h('span', {}, `${p.stats.active} in progress`),
-      h('span', { class: 'grow', style: { textAlign: 'right' } }, `est. ${fmtHours(p.stats.est || 0)}`)),
-    h('div', { class: 'row', style: { justifyContent: 'flex-end', borderTop: '1px solid var(--border)', paddingTop: '8px' } },
-      h('button', {
-        class: 'sm danger', title: 'Delete this project',
-        onclick: async e => { e.stopPropagation(); if (await deleteProject(p)) go('#/projects'); },
-      }, '🗑 Delete project')));
+      h('span', { class: 'grow', style: { textAlign: 'right' } }, `est. ${fmtHours(p.stats.est || 0)}`)));
   page.append(
     h('div', { class: 'page-head' }, h('h1', {}, 'Projects'), h('div', { class: 'spacer' }),
       h('button', { class: 'primary', onclick: () => registerProjectModal() }, '+ Register project')),
