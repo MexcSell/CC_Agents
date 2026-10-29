@@ -404,25 +404,94 @@ export function pickDirectory({ title = 'Choose a folder', start = '/', root = '
   return new Promise(resolve => {
     let current = start;
     let chosen = null;
-    const pathInput = h('input', { type: 'text', class: 'mono', value: start });
+    let listed = null;      // the folder (as typed or opened) whose subfolders are listed
+    let dirs = [];          // subfolders of `listed`, each { entry, node }
+    let selected = null;    // the subfolder matching the typed name
+    let seq = 0;
+    let pending = null;
+    const pathInput = h('input', { type: 'text', class: 'mono', value: start, spellcheck: 'false', autocomplete: 'off' });
     const list = h('div', { class: 'dir-picker' });
-    const load = async (dir, fallbackUp = false) => {
-      try {
-        const res = await api('GET', `/api/fs/list?path=${enc(dir)}&root=${enc(root)}&hidden=1`, undefined, { quiet: true });
-        current = res.path;
-        pathInput.value = current;
-        const dirs = res.entries.filter(e => e.is_dir);
-        fill(list,
-          res.parent ? h('div', { class: 'fx-node', onclick: () => load(res.parent) }, h('span', { class: 'ico' }, '⬆'), h('span', { class: 'name' }, '..')) : null,
-          ...dirs.map(e => h('div', { class: 'fx-node', onclick: () => load(e.path), title: e.path },
-            h('span', { class: 'ico' }, '📁'), h('span', { class: 'name' }, e.name))),
-          dirs.length ? null : h('div', { class: 'empty small' }, 'No subfolders'));
-      } catch (e) {
-        if (fallbackUp && dir !== '/' && dir !== root) return load(parentOf(dir), true);
-        toast(e.message, 'error');
-      }
+    const norm = p => (p.length > 1 ? p.replace(/\/+$/, '') : p) || '/';
+    // Split the typed path into the folder to list and the partial name of one of its subfolders.
+    const split = value => {
+      const i = value.lastIndexOf('/');
+      return { dir: i <= 0 ? '/' : norm(value.slice(0, i)), prefix: i < 0 ? '/' : value.slice(0, i + 1), partial: value.slice(i + 1) };
     };
-    pathInput.addEventListener('keydown', e => { if (e.key === 'Enter') load(pathInput.value.trim()); });
+    const matches = partial => {
+      const exact = dirs.filter(d => d.entry.name.startsWith(partial));
+      if (exact.length) return exact;
+      const lower = partial.toLowerCase();
+      return dirs.filter(d => d.entry.name.toLowerCase().startsWith(lower));
+    };
+    const highlight = () => {
+      const { dir, partial } = split(pathInput.value.trim());
+      selected = null;
+      if (dir === listed && partial) {
+        const found = matches(partial);
+        selected = found.find(d => d.entry.name === partial) || found[0] || null;
+      }
+      for (const d of dirs) d.node.classList.toggle('selected', d === selected);
+      selected?.node.scrollIntoView({ block: 'nearest' });
+    };
+    const load = (dir, { typed = false, fallbackUp = false } = {}) => {
+      const token = ++seq;
+      const run = async () => {
+        try {
+          const res = await api('GET', `/api/fs/list?path=${enc(dir)}&root=${enc(root)}&hidden=1`, undefined, { quiet: true });
+          if (token !== seq) return;
+          current = res.path;
+          listed = typed ? norm(dir) : norm(res.path);
+          if (!typed) pathInput.value = current;
+          dirs = res.entries.filter(e => e.is_dir).map(entry => ({
+            entry,
+            node: h('div', { class: 'fx-node', onclick: () => load(entry.path), title: entry.path },
+              h('span', { class: 'ico' }, '📁'), h('span', { class: 'name' }, entry.name)),
+          }));
+          fill(list,
+            res.parent ? h('div', { class: 'fx-node', onclick: () => load(res.parent) }, h('span', { class: 'ico' }, '⬆'), h('span', { class: 'name' }, '..')) : null,
+            ...dirs.map(d => d.node),
+            dirs.length ? null : h('div', { class: 'empty small' }, 'No subfolders'));
+          highlight();
+        } catch (e) {
+          if (token !== seq) return;
+          if (fallbackUp && dir !== '/' && dir !== root) return load(parentOf(dir), { fallbackUp: true });
+          if (typed) highlight(); else toast(e.message, 'error');
+        }
+      };
+      return (pending = run());
+    };
+    // Follow the typed path: list its folder and select the subfolder whose name is being typed.
+    const follow = () => {
+      const value = pathInput.value.trim();
+      if (!value.startsWith('/')) return highlight();
+      const { dir } = split(value);
+      if (dir !== listed) return load(dir, { typed: true });
+      highlight();
+    };
+    const complete = async () => {
+      await follow();
+      await pending;
+      const value = pathInput.value.trim();
+      const { dir, prefix, partial } = split(value);
+      if (dir !== listed) return;
+      const found = matches(partial);
+      if (!found.length) return;
+      if (found.length === 1) {
+        pathInput.value = prefix + found[0].entry.name + '/';
+      } else {
+        const names = found.map(d => d.entry.name);
+        let common = names[0];
+        for (const n of names) while (!n.toLowerCase().startsWith(common.toLowerCase())) common = common.slice(0, -1);
+        if (common.length <= partial.length) return;
+        pathInput.value = prefix + common;
+      }
+      follow();
+    };
+    pathInput.addEventListener('input', follow);
+    pathInput.addEventListener('keydown', e => {
+      if (e.key === 'Tab' && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) { e.preventDefault(); complete(); }
+      if (e.key === 'Enter') { e.preventDefault(); load(selected ? selected.entry.path : pathInput.value.trim()); }
+    });
     const newFolder = h('button', { class: 'sm', onclick: async () => {
       const name = await promptDialog('New folder', { label: `Create inside ${current}`, okLabel: 'Create' });
       if (!name) return;
@@ -431,10 +500,19 @@ export function pickDirectory({ title = 'Choose a folder', start = '/', root = '
     modal({
       title,
       body: h('div', { class: 'stack' }, h('div', { class: 'row' }, pathInput, allowCreate ? newFolder : null), list,
-        h('div', { class: 'small muted' }, 'Click a folder to open it; the folder shown in the path box is selected.')),
-      actions: [{ label: okLabel, kind: 'primary', onClick: () => { chosen = current; } }],
+        h('div', { class: 'small muted' }, 'Click a folder to open it, or type a path (Tab completes it); the folder shown in the path box is selected.')),
+      actions: [{ label: okLabel, kind: 'primary', onClick: async () => {
+        await pending;
+        const value = norm(pathInput.value.trim());
+        if (value === listed || value === current) { chosen = current; return; }
+        if (selected && norm(selected.entry.path) === value) { chosen = selected.entry.path; return; }
+        try {
+          const res = await api('GET', `/api/fs/list?path=${enc(value)}&root=${enc(root)}&hidden=1`, undefined, { quiet: true });
+          chosen = res.path;
+        } catch (e) { toast(e.message, 'error'); return false; }
+      } }],
       onClose: () => resolve(chosen),
     });
-    load(start, true);
+    load(start, { fallbackUp: true });
   });
 }
