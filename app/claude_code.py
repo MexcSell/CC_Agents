@@ -132,13 +132,16 @@ def _mcp_tools(run, spec: AgentSpec) -> list:
         return handler
 
     defs = {d["name"]: d for d in T.TASK_TOOLS + T.DEV_TOOLS}
+    dev_tools = {"restart_server": lambda a: runs._restart(run, a),
+                 "read_server_log": lambda a: maintenance.tail_log(max(1, min(a.get("lines", 120), 2000)))}
     if spec.kind == "task":
         team_tools = [wrap(d, lambda a, fn=team.HANDLERS[d["name"]]: fn(run, spec, a))
                       for d in spec.tools if d.get("name") in team.HANDLERS]
-        return [wrap(defs["update_task"], lambda a: runs._update_task(run, spec.task_id, a)), *team_tools]
+        # The development team of this website (app/devteam.py) also gets the server tools.
+        site_tools = [wrap(defs[d["name"]], dev_tools[d["name"]]) for d in spec.tools if d.get("name") in dev_tools]
+        return [wrap(defs["update_task"], lambda a: runs._update_task(run, spec.task_id, a)), *team_tools, *site_tools]
     if spec.kind == "dev":
-        return [wrap(defs["restart_server"], lambda a: runs._restart(run, a)),
-                wrap(defs["read_server_log"], lambda a: maintenance.tail_log(max(1, min(a.get("lines", 120), 2000))))]
+        return [wrap(defs[name], fn) for name, fn in dev_tools.items()]
     return []
 
 

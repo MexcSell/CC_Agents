@@ -9,6 +9,7 @@ const routes = [
   [/^#?\/?$/, pages.dashboardPage, 'dashboard'],
   [/^#\/chat(?:\/(\d+))?(?:\/(\d+))?$/, pages.chatPage, 'chat'],
   [/^#\/dev(?:\/(\d+))?$/, pages.devPage, 'dev'],
+  [/^#\/dev\/team(?:\/(tasks|files|team|knowledge|agent|server))?(?:\/(\d+))?$/, pages.devTeamPage, 'dev'],
   [/^#\/projects$/, pages.projectsPage, 'projects'],
   [/^#\/projects\/(\d+)(?:\/(tasks|files|team|knowledge|agent))?(?:\/(\d+))?$/, pages.projectPage, 'projects'],
   [/^#\/templates(?:\/(groups))?$/, templatesPage, 'templates'],
@@ -33,6 +34,9 @@ async function route() {
   const force = state.forceRoute;
   state.forceRoute = false;
   const [path, qs] = (location.hash || '#/').split('?');
+  // The development team's project pages live on the Developer page.
+  const devProject = path.match(/^#\/projects\/(\d+)(\/.*)?$/);
+  if (devProject && +devProject[1] === state.info?.dev_project_id) { location.replace(`#/dev/team${devProject[2] || ''}`); return; }
   const match = routes.map(([rx, page, nav]) => [path.match(rx), page, nav]).find(([m]) => m);
   if (!match) { location.replace('#/'); return; }
   const [m, page, nav] = match;
@@ -40,7 +44,8 @@ async function route() {
   const query = new URLSearchParams(qs || '');
   const mine = ++token;
   document.querySelectorAll('#sidebar a.nav').forEach(a => a.classList.toggle('active', a.dataset.nav === nav));
-  setUsageScope(nav === 'dev' ? { scope: 'dev' } : nav === 'projects' ? { scope: 'project', project_id: params[0] ? +params[0] : null } : { scope: 'chat' });
+  setUsageScope(page === pages.devTeamPage && state.info?.dev_project_id ? { scope: 'project', project_id: state.info.dev_project_id }
+    : nav === 'dev' ? { scope: 'dev' } : nav === 'projects' ? { scope: 'project', project_id: params[0] ? +params[0] : null } : { scope: 'chat' });
 
   // Selecting something inside the page on screen (a conversation, a session, a task) updates it in place.
   if (!force && current?.page === page && current.update) {

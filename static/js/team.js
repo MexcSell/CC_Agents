@@ -1,7 +1,7 @@
 // Project teams: the team tree and agent editor, the agent group picker, questions the agents ask the
 // user, the team discussion of a task, and the knowledge (lessons learned) of a project.
 
-import { api, h, fill, go, field, state, toast, modal, confirmDialog, md, timeAgo, fmtDate, modelOptions, effortOptions } from './core.js';
+import { api, h, fill, go, field, state, projectBase, toast, modal, confirmDialog, md, timeAgo, fmtDate, modelOptions, effortOptions } from './core.js';
 import { autocomplete, rankMatches, agentTemplateFields } from './templates.js';
 import { pickDirectory } from './files.js';
 
@@ -148,6 +148,7 @@ export async function teamTab(el, project, onSaved) {
   const desc = h('textarea', { rows: 3, value: project.description });
   const repo = h('input', { type: 'text', class: 'mono', value: project.repo_path });
   const create = h('input', { type: 'checkbox' });
+  const dev = project.system === 'dev';   // the development team of this website: its repository is the site's source
   el.append(h('div', { class: 'two-col', style: { alignItems: 'start' } },
     h('div', { class: 'card stack' },
       h('div', { class: 'row' }, h('h2', { class: 'grow', style: { margin: 0 } }, `👥 Team (${project.agents.length})`),
@@ -157,34 +158,38 @@ export async function teamTab(el, project, onSaved) {
       treeHost),
     h('div', { class: 'stack' },
       h('div', { class: 'card form-grid' },
-        h('h2', { style: { margin: 0 } }, 'Project'),
+        h('h2', { style: { margin: 0 } }, dev ? 'Development team' : 'Project'),
         field('Name', name),
-        field('Description', desc),
-        h('label', { class: 'field' }, 'Repository folder', h('div', { class: 'row' }, repo, h('button', {
+        field('Description', desc, dev ? 'Every agent of the team reads this in its briefing.' : undefined),
+        dev ? h('div', { class: 'small muted' }, 'Works in this website’s source folder ', h('code', {}, project.repo_path), '.') : null,
+        dev ? null : h('label', { class: 'field' }, 'Repository folder', h('div', { class: 'row' }, repo, h('button', {
           onclick: async () => {
             const picked = await pickDirectory({ title: 'Choose the project repository', start: repo.value || '/', okLabel: 'Use this folder' });
             if (picked) repo.value = picked;
           },
         }, '📁 Browse…'))),
-        h('label', { class: 'check' }, create, 'Create the folder if it does not exist'),
+        dev ? null : h('label', { class: 'check' }, create, 'Create the folder if it does not exist'),
         h('div', {}, h('button', {
           class: 'primary', onclick: async () => {
             const p = await api('PUT', `/api/projects/${project.id}`, { name: name.value, description: desc.value, repo_path: repo.value, create_repo: create.checked });
-            toast('Project saved', 'ok');
+            toast(dev ? 'Saved' : 'Project saved', 'ok');
             onSaved({ ...p, repo_exists: true });
           },
-        }, 'Save project'))),
+        }, dev ? 'Save' : 'Save project'))),
       h('div', { class: 'card stack' },
-        h('h2', { style: { margin: 0 } }, 'Unregister project'),
-        h('div', { class: 'small muted' }, 'Removes the project, its team, tasks, agent logs and the team’s lessons from Agent Group. Files in the repository are not touched.'),
+        h('h2', { style: { margin: 0 } }, dev ? 'Disband the team' : 'Unregister project'),
+        h('div', { class: 'small muted' }, dev ? 'Removes the development team, its tasks, agent logs and the team’s lessons. The website’s source code is not touched; you can set up a new team afterwards.'
+          : 'Removes the project, its team, tasks, agent logs and the team’s lessons from Agent Group. Files in the repository are not touched.'),
         h('div', {}, h('button', {
           class: 'danger', onclick: async () => {
-            if (!await confirmDialog(`Unregister "${project.name}"? Its tasks and agent logs are deleted; the repository files stay.`, { okLabel: 'Unregister', danger: true })) return;
+            if (!await confirmDialog(dev ? 'Disband the development team? Its tasks and agent logs are deleted; the source code stays.'
+              : `Unregister "${project.name}"? Its tasks and agent logs are deleted; the repository files stay.`, { okLabel: dev ? 'Disband' : 'Unregister', danger: true })) return;
             await api('DELETE', `/api/projects/${project.id}`);
-            toast('Project unregistered', 'ok');
-            go('#/projects');
+            toast(dev ? 'Development team disbanded' : 'Project unregistered', 'ok');
+            if (dev && state.info) state.info.dev_project_id = null;
+            go(dev ? '#/dev/team' : '#/projects');
           },
-        }, 'Unregister project'))))));
+        }, dev ? 'Disband the team' : 'Unregister project'))))));
   renderTree();
 }
 
@@ -206,7 +211,7 @@ export function questionsCard(questions, { currentTask, projectId, onChange } = 
     box.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) answer(q, box.value); });
     return h('div', { class: 'question' },
       h('div', { class: 'row small' }, h('b', {}, `❓ ${q.agent_name}`),
-        q.task_id !== currentTask ? h('a', { href: `#/projects/${q.project_id ?? projectId}/tasks/${q.task_id}` }, `on #${q.task_id} ${q.task_title || ''}`) : null,
+        q.task_id !== currentTask ? h('a', { href: `${projectBase(q.project_id ?? projectId)}/tasks/${q.task_id}` }, `on #${q.task_id} ${q.task_title || ''}`) : null,
         h('span', { class: 'grow muted', style: { textAlign: 'right' } }, timeAgo(q.created_at))),
       md(q.question),
       q.options?.length ? h('div', { class: 'row wrap', style: { gap: '6px' } }, q.options.map(o => h('button', { class: 'sm', onclick: () => answer(q, o) }, o))) : null,

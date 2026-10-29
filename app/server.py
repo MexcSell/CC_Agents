@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Res
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import agents, db, fsops, groups, images, maintenance, runs, team, templates, usage
+from . import agents, db, devteam, fsops, groups, images, maintenance, runs, team, templates, usage
 from .config import (ACCESS_TOKEN, APP_ROOT, EFFORTS, HOST, MODELS, PORT, RESTART_EXIT_CODE,
                      STATIC_DIR)
 
@@ -112,6 +112,7 @@ def system_info():
         "pid": os.getpid(), "started_at": STARTED_AT, "app_root": str(APP_ROOT), "port": PORT,
         "supervised": maintenance.under_supervisor(), "models": MODELS, "efforts": EFFORTS,
         "home": str(Path.home()), "python": sys.version.split()[0], "engine": db.get_settings()["engine"],
+        "dev_project_id": devteam.project_id(),
     }
 
 
@@ -121,7 +122,7 @@ def dashboard():
     return {
         "topics": db.one("SELECT COUNT(*) n FROM topics")["n"],
         "conversations": db.one("SELECT COUNT(*) n FROM conversations WHERE kind = 'chat'")["n"],
-        "projects": db.one("SELECT COUNT(*) n FROM projects")["n"],
+        "projects": db.one("SELECT COUNT(*) n FROM projects WHERE system = ''")["n"],
         "tasks": by_status,
         "active_runs": runs.active_runs(),
         "recent_tasks": db.query(
@@ -605,7 +606,7 @@ def _running_task_ids() -> set[int]:
 
 @app.get("/api/projects")
 def list_projects():
-    projects = db.query("SELECT * FROM projects ORDER BY updated_at DESC")
+    projects = db.query("SELECT * FROM projects WHERE system = '' ORDER BY updated_at DESC")
     running = _running_task_ids()
     for p in projects:
         agents_ = db.list_agents(p["id"])
@@ -654,8 +655,8 @@ def get_project(pid: int):
 
 @app.put("/api/projects/{pid}")
 def update_project(pid: int, body: ProjectPatch):
-    _project_or_404(pid)
-    repo = _check_repo(body.repo_path, body.create_repo)
+    p = _project_or_404(pid)
+    repo = str(APP_ROOT) if devteam.is_dev(p) else _check_repo(body.repo_path, body.create_repo)
     db.execute("UPDATE projects SET name = ?, description = ?, repo_path = ?, updated_at = ? WHERE id = ?",
                (body.name.strip(), body.description, repo, db.now(), pid))
     return _project_or_404(pid)
@@ -753,6 +754,41 @@ def delete_project(pid: int):
     db.execute("DELETE FROM learnings WHERE project_id = ? AND scope != 'role'", (pid,))
     db.execute("DELETE FROM projects WHERE id = ?", (pid,))
     return {"ok": True}
+
+
+# ---------------------------------------------------------------- the development team of this website
+
+class DevTeamIn(BaseModel):
+    group: str = devteam.DEFAULT_GROUP
+    model: str = ""
+    effort: str = ""
+
+
+@app.get("/api/devteam")
+def get_devteam():
+    """The development team's project (None until it is set up) and the group suggested for it."""
+    p = devteam.project()
+    if p:
+        p["repo_exists"] = True
+    return {"project": p, "default_group": devteam.DEFAULT_GROUP}
+
+
+@app.post("/api/devteam")
+def create_devteam(body: DevTeamIn):
+    """Set up the development team: a built-in project on the app's own source with an agent group's team."""
+    if devteam.project_id():
+        raise HTTPException(409, "The development team already exists. Change it under Team & settings.")
+    group = _group_or_400(body.group)
+    s = db.get_settings()
+    model = body.model if body.model in MODEL_IDS else s["dev_model"]
+    effort = body.effort if body.effort in EFFORTS else s["dev_effort"]
+    ts = db.now()
+    with db.transaction():
+        pid = db._conn.execute(
+            "INSERT INTO projects(name, description, repo_path, system, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?)",
+            (devteam.NAME, devteam.DESCRIPTION, str(APP_ROOT), devteam.SYSTEM, ts, ts)).lastrowid
+        _insert_team(pid, group, model, effort, ts)
+    return get_devteam()
 
 
 # ---------------------------------------------------------------- learnings

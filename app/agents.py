@@ -9,7 +9,7 @@ they reach the agent through the next user message instead.
 
 from dataclasses import dataclass, field
 
-from . import db, maintenance, team, templates, tools as T
+from . import db, devteam, maintenance, team, templates, tools as T
 from .config import APP_ROOT, DEV_PROTECTED_DIRS, PORT
 
 
@@ -72,11 +72,7 @@ def chat_spec(conv: dict) -> AgentSpec:
 
 # ---------------------------------------------------------------- developer
 
-DEV_SYSTEM = f"""You are the Developer agent of Agent Group, the web application you are running inside. \
-Your workspace is the application's own source directory, {APP_ROOT}. You develop, modify, debug and \
-restart this website when the user asks.
-
-Architecture:
+ARCHITECTURE = f"""Architecture:
 - supervisor.py: starts the server (`python -m app.server`) as a child process, restarts it when it \
 exits with code 3, and restores the latest snapshot if a restarted server keeps crashing on startup.
 - app/server.py: FastAPI app. REST API under /api, Server-Sent Events for agent runs, serves static/ at /.
@@ -85,6 +81,7 @@ exits with code 3, and restores the latest snapshot if a restarted server keeps 
 - app/templates.py: agent templates (referred to as @slug), context-dependent editor suggestions, internal \
 agents; app/template_presets.py: the built-in templates (by functional area and language) and agent groups.
 - app/groups.py: agent groups (#slug), hierarchical teams of templates that become a project's agents.
+- app/devteam.py: the development team of this website (a built-in project on the Developer page).
 - app/team.py: team work on tasks: sub-tasks, delegation, consultations, questions to the user, lessons \
 learned, the team discussion.
 - app/runs.py: run manager and the streaming Claude tool-use loop for the API engine (Anthropic Python SDK).
@@ -98,7 +95,13 @@ js/core.js (API client, DOM helper h(), dialogs, Markdown), js/pages.js (every p
 js/conversation.js (live agent conversation view over SSE), js/files.js (file explorer), \
 js/templates.js (templates and agent groups pages, autocomplete and chip inputs), js/team.js (project \
 team, questions, team discussion, knowledge).
-- The server listens on port {PORT}. Health check: `curl -s localhost:{PORT}/api/health`.
+- The server listens on port {PORT}. Health check: `curl -s localhost:{PORT}/api/health`."""
+
+DEV_SYSTEM = f"""You are the Developer agent of Agent Group, the web application you are running inside. \
+Your workspace is the application's own source directory, {APP_ROOT}. You develop, modify, debug and \
+restart this website when the user asks.
+
+{ARCHITECTURE}
 
 How to work:
 - Read the files you are about to change and follow their existing style.
@@ -193,6 +196,33 @@ for yourself, "team" for the whole project team, "role" for general know-how use
 template. Before finishing a task, take a moment to record what you learned."""
 
 
+DEV_TEAM_COMMON = f"""This project is Agent Group itself: the web application you are running inside, so \
+your team develops and maintains the website the user is looking at.
+
+{ARCHITECTURE}
+
+Working on this website:
+- Read the files you are about to change and follow their existing style.
+- Changes under static/ take effect when the browser reloads. Changes to Python files take effect only \
+after a server restart.
+- A snapshot of the source is saved automatically before the team's first file change on a task; the user \
+can restore snapshots from the Developer page.
+- File tools cannot modify {", ".join(d + "/" for d in DEV_PROTECTED_DIRS)}. Install Python packages with \
+run_command (`.venv/bin/pip install ...`) and add them to requirements.txt.
+- read_server_log shows the server's output, including tracebacks. On Claude Code it is \
+mcp__agent__read_server_log."""
+
+DEV_TEAM_LEAD = """- You are the only one on the team who can restart the server (restart_server; on Claude Code \
+mcp__agent__restart_server). A restart interrupts every running agent, your team included, so restart once, \
+at the very end: after all sub-tasks are accepted and the change is verified, update your task record (status \
+"done", summary), give your final report, and call restart_server as your last action. A preflight check runs \
+first and refuses the restart if the app does not compile or import. Restart only when Python files changed."""
+
+DEV_TEAM_MEMBER = """- You cannot restart the server; your lead does that at the end. Verify Python changes \
+without a restart: `.venv/bin/python -m py_compile <files>` and an import of the changed modules. In your \
+report, say whether a restart is needed."""
+
+
 def task_system_prompt(project: dict, agent: dict) -> str:
     template, _ = templates.resolve_agent(agent)
     role_text = agent["role"].strip() or (template["role"] if template else "")
@@ -201,6 +231,9 @@ def task_system_prompt(project: dict, agent: dict) -> str:
     profile = template_profile(agent)
     profile = f"\n\n{profile}" if profile else ""
     leads = any(a["parent_id"] == agent["id"] for a in project["agents"])
+    site = ""
+    if devteam.is_dev(project):
+        site = f"\n\n{DEV_TEAM_COMMON}\n{DEV_TEAM_LEAD if agent['depth'] == 0 else DEV_TEAM_MEMBER}"
     return f"""You are {agent['name']}, an agent of the team working on the project "{project['name']}" in \
 Agent Group.{role}{profile}
 
@@ -208,7 +241,7 @@ Project description:
 {project['description'].strip() or '(none)'}
 
 Your workspace root is the project's repository: {project['repo_path']}
-File tool paths are relative to it, and run_command runs in it.
+File tool paths are relative to it, and run_command runs in it.{site}
 
 The project team (indentation shows who reports to whom; address teammates by the key in brackets):
 {team_roster(project, agent)}
@@ -230,9 +263,16 @@ def _subagents(agent: dict) -> dict:
 
 def task_spec(project: dict, agent: dict, task_id: int) -> AgentSpec:
     s = db.get_settings()
-    ws = T.Workspace(project["repo_path"], allow_commands=s["allow_commands"])
     leads = any(a["parent_id"] == agent["id"] for a in project["agents"])
     tools = T.FILE_TOOLS + T.TASK_TOOLS + T.TEAM_TOOLS + (T.LEAD_TOOLS if leads else [])
+    if devteam.is_dev(project):
+        root_id = team.root_of(db.get_task(task_id))["id"]
+        ws = T.Workspace(project["repo_path"], allow_commands=s["allow_commands"], protected=DEV_PROTECTED_DIRS,
+                         before_write=lambda: devteam.snapshot_before_change(root_id))
+        dev_tools = {t["name"]: t for t in T.DEV_TOOLS}
+        tools = tools + [dev_tools["read_server_log"]] + ([dev_tools["restart_server"]] if agent["depth"] == 0 else [])
+    else:
+        ws = T.Workspace(project["repo_path"], allow_commands=s["allow_commands"])
     return AgentSpec(kind="task", model=agent["model"], effort=agent["effort"], tools=tools, workspace=ws,
                      task_id=task_id, max_turns=s["max_agent_turns"], engine=s["engine"],
                      subagents=_subagents(agent), project_id=project["id"], agent_id=agent["id"])

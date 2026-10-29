@@ -53,6 +53,9 @@ export function go(hash) {
   } else location.hash = hash;
 }
 
+/** The route of a project's pages: the development team of this website lives on the Developer page. */
+export const projectBase = pid => (pid && pid === state.info?.dev_project_id ? '#/dev/team' : `#/projects/${pid}`);
+
 export function field(label, input, hint) {
   return h('label', { class: 'field' }, label, input, hint ? h('span', { class: 'hint' }, hint) : null);
 }
