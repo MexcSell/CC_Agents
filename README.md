@@ -36,7 +36,7 @@ are carried over as text.
 
 If you work through VS Code Remote or SSH, forward port 8765 to your machine. VS Code usually does this automatically.
 
-## How the requirements map to the app
+## How the requirements map to the app 
 
 | Requirement | Where |
 |---|---|
