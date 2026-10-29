@@ -20,7 +20,7 @@ from claude_agent_sdk import (AssistantMessage, ClaudeAgentOptions, ClaudeSDKCli
                               TextBlock, ThinkingBlock, ToolResultBlock, ToolUseBlock, UserMessage,
                               create_sdk_mcp_server, tool)
 
-from . import db, fsops, images, maintenance, tools as T
+from . import db, fsops, images, maintenance, team, tools as T
 from .agents import CLAUDE_CODE_NOTES, AgentSpec
 from .config import DATA_DIR
 
@@ -31,6 +31,9 @@ WRITE_TOOLS = {"Write": "file_path", "Edit": "file_path", "MultiEdit": "file_pat
 INTERACTIVE_TOOLS = ["AskUserQuestion", "EnterPlanMode", "ExitPlanMode"]
 TRANSCRIPT_LIMIT = 60_000
 CHAT_DIR = DATA_DIR / "chat-workspace"
+# Team tools (delegate, ask_agent, ask_user) block while teammates work or the user answers; Claude Code
+# would otherwise abort such long MCP tool calls.
+MCP_TOOL_TIMEOUT_MS = str(7 * 24 * 3600 * 1000)
 
 # Variables that tie a process to the Claude Code session it was started from. The server inherits
 # them when it is launched from inside Claude Code; the agents' Claude Code processes must not.
@@ -130,7 +133,9 @@ def _mcp_tools(run, spec: AgentSpec) -> list:
 
     defs = {d["name"]: d for d in T.TASK_TOOLS + T.DEV_TOOLS}
     if spec.kind == "task":
-        return [wrap(defs["update_task"], lambda a: runs._update_task(run, spec.task_id, a))]
+        team_tools = [wrap(d, lambda a, fn=team.HANDLERS[d["name"]]: fn(run, spec, a))
+                      for d in spec.tools if d.get("name") in team.HANDLERS]
+        return [wrap(defs["update_task"], lambda a: runs._update_task(run, spec.task_id, a)), *team_tools]
     if spec.kind == "dev":
         return [wrap(defs["restart_server"], lambda a: runs._restart(run, a)),
                 wrap(defs["read_server_log"], lambda a: maintenance.tail_log(max(1, min(a.get("lines", 120), 2000))))]
@@ -143,9 +148,12 @@ def _gate(spec: AgentSpec):
 
     async def gate(name, args, _context):
         if name in INTERACTIVE_TOOLS:
-            return PermissionResultDeny(message="This session is not interactive. Ask the user in your reply instead.")
+            how = "the mcp__agent__ask_user tool" if spec.kind == "task" else "your reply"
+            return PermissionResultDeny(message=f"This session is not interactive. Ask the user with {how} instead.")
         if ws is None:
             return PermissionResultAllow()
+        if spec.kind == "consult" and (name in WRITE_TOOLS or name == "Bash"):
+            return PermissionResultDeny(message="You are being consulted: read the repository, do not change it.")
         if name == "Bash" and not ws.allow_commands:
             return PermissionResultDeny(message="Shell commands are disabled in Agent Group's settings.")
         if name in WRITE_TOOLS:
@@ -170,12 +178,17 @@ def _options(run, spec: AgentSpec, conv: dict, resume: str | None, stderr: deque
 
     common = dict(model=spec.model, effort=spec.effort, include_partial_messages=True, can_use_tool=_gate(spec),
                   permission_mode="default", max_turns=spec.max_turns, resume=resume, cli_path=cli_path(),
-                  stderr=on_stderr, disallowed_tools=INTERACTIVE_TOOLS)
+                  stderr=on_stderr, disallowed_tools=INTERACTIVE_TOOLS, env={"MCP_TOOL_TIMEOUT": MCP_TOOL_TIMEOUT_MS})
     if spec.kind == "chat":
         CHAT_DIR.mkdir(parents=True, exist_ok=True)
         return ClaudeAgentOptions(**common, cwd=str(CHAT_DIR), setting_sources=[],
                                   system_prompt=conv["system_prompt"],
                                   tools=["WebSearch", "WebFetch"] if spec.web_search else [])
+    if spec.kind == "consult":
+        return ClaudeAgentOptions(**common, cwd=str(spec.workspace.root), setting_sources=["project"],
+                                  system_prompt={"type": "preset", "preset": "claude_code",
+                                                 "append": conv["system_prompt"] + CLAUDE_CODE_NOTES["consult"]},
+                                  tools=["Read", "Glob", "Grep"])
     return ClaudeAgentOptions(
         **common, cwd=str(spec.workspace.root), setting_sources=["project"],
         system_prompt={"type": "preset", "preset": "claude_code",

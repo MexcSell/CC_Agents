@@ -3,8 +3,8 @@
 A web workspace where Claude agents work for you:
 
 - **Chat**: create topics, hold conversations with Claude about them, keep or delete the history.
-- **Projects**: register a project with its repository folder. Each project gets its own agent. Assign tasks to the agent and it carries them out, keeping an estimate, progress, insights and next actions up to date.
-- **Templates**: reusable agent profiles (role, areas of expertise, skills, rules), each with a symbol such as `@code-reviewer`. Base a project agent on a template, or give an agent internal agents (sub-agents) it can delegate to. 35 starter templates in six categories are installed on first run. In the editor, every field suggests candidates that depend on the fields above it.
+- **Projects**: register a project with its repository folder and an agent group: a hierarchical team of agents. Tasks go to the team's lead, who breaks them into sub-tasks, delegates them down the team, reviews the results and keeps estimate, progress, insights and next actions up to date. Agents consult each other, ask you when only you can decide, and record lessons that improve their later work.
+- **Templates & groups**: reusable agent profiles (role, areas of expertise, skills, rules), classified by functional area and programming language, each with a symbol such as `@python-developer`; and agent groups, hierarchical teams of templates such as `#python-team`. 74 starter templates (developer, tech lead and QA for 13 languages, plus managers, designers, DevOps, security and more) and 23 starter groups are installed. In the template editor, every field suggests candidates that depend on the fields above it.
 - **Files**: browse the whole file system or a project's repository. Create, open, edit, rename, move (drag and drop) and delete files and folders.
 - **Developer**: an agent that develops and modifies this website's own code and restarts it. Code snapshots and automatic rollback keep a broken change from taking the site down.
 
@@ -46,7 +46,7 @@ If you work through VS Code Remote or SSH, forward port 8765 to your machine. VS
 | Agent that converses with Claude | **Chat** page, streaming replies with visible reasoning summaries |
 | Register topics, converse by topic, store or delete history | **Chat**: topics → conversations. History is stored in SQLite. Delete one conversation, clear a topic's history, delete a topic, or export a conversation as Markdown |
 | Register projects | **Projects → Register project** |
-| Every project has an agent that is assigned tasks and carries them out | Each project has one agent (name, role, instructions, model, effort). Every task in the project is assigned to it; **Run agent** starts the work |
+| Every project has an agent that is assigned tasks and carries them out | Each project has a team (from an agent group, or a single agent). Tasks go to the lead (or an agent you choose); **Run agent** starts the work |
 | Per task: total estimated time, progress, emergent ideas/insights, upcoming action items | Task panel: estimated total time, status and progress %, agent time spent, insights, next actions and an activity log. The agent updates them through its `update_task` tool, and you can edit them too |
 | Specify the repository a project works with | Repository folder field when registering (with a folder picker and an option to create the folder). The agent's tools are confined to it |
 | View and manage the repository's file structure | Project → **Repository files** tab |
@@ -85,6 +85,31 @@ The **Stop** button cancels a run.
 
 The refusal fallback is on by default: if a safety classifier declines a request, the API retries it on a
 recommended fallback model. It doesn't apply to Haiku, and you can turn it off in Settings.
+
+## Teams
+
+A project's agents form a hierarchy. The agent at the top, the lead, receives the tasks you add (you can also
+assign a task to any agent directly). An agent with reports gets extra tools:
+
+| Tool | What it does |
+|---|---|
+| `create_subtasks` | splits its task into sub-tasks, each assigned to an agent below it |
+| `delegate` | starts the assignees on sub-tasks (several in parallel, up to *Agents working in parallel per lead* in Settings) and waits for their reports |
+| `review_subtask` | accepts a result, sends it back for changes, blocks or cancels it |
+
+Every project agent also has:
+
+| Tool | What it does |
+|---|---|
+| `ask_agent` | consults a teammate, who answers in a read-only session |
+| `ask_user` | asks you a question; the agent waits until you answer on the task page or the dashboard (the sidebar shows open questions) |
+| `record_learning` | stores a lesson for itself, for the project team, or for every agent based on its template in all projects |
+
+Lessons are added to each agent's briefings, and the project's **Knowledge** tab lists them. Delegations,
+reports, reviews, consultations, questions and lessons appear in the task's **Team discussion**. Each sub-task
+has its own work log. Stopping a lead's run also stops the runs it is waiting for. If you answer a question
+after the asking run has ended (for example after a restart), the lead of the top-level task is started with
+your answer.
 
 ## Restarts and recovery
 
@@ -129,7 +154,9 @@ app/runs.py               run manager and the API engine's streaming tool-use lo
 app/claude_code.py        the Claude Code engine (Claude Agent SDK)
 app/agents.py             system prompts and tool sets of the three agent types
 app/templates.py          agent templates (@symbols), context-dependent editor suggestions, internal agents
-app/template_presets.py   the built-in starter templates and categories
+app/template_presets.py   the built-in templates (areas, languages), categories and agent groups
+app/groups.py             agent groups (#symbols): hierarchical teams of templates
+app/team.py               team work: sub-tasks, delegation, consultations, questions, lessons, discussion
 app/tools.py              tool definitions and executors
 app/fsops.py              filesystem operations (file browser and file tools)
 app/maintenance.py        snapshots, preflight, restart, server log

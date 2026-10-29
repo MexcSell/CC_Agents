@@ -10,8 +10,8 @@ const routes = [
   [/^#\/chat(?:\/(\d+))?(?:\/(\d+))?$/, pages.chatPage, 'chat'],
   [/^#\/dev(?:\/(\d+))?$/, pages.devPage, 'dev'],
   [/^#\/projects$/, pages.projectsPage, 'projects'],
-  [/^#\/projects\/(\d+)(?:\/(tasks|files|agent))?(?:\/(\d+))?$/, pages.projectPage, 'projects'],
-  [/^#\/templates$/, templatesPage, 'templates'],
+  [/^#\/projects\/(\d+)(?:\/(tasks|files|team|knowledge|agent))?(?:\/(\d+))?$/, pages.projectPage, 'projects'],
+  [/^#\/templates(?:\/(groups))?$/, templatesPage, 'templates'],
   [/^#\/files$/, pages.filesPage, 'files'],
   [/^#\/settings$/, pages.settingsPage, 'settings'],
   [/^#\/c\/(\d+)$/, pages.conversationRedirect, null],
@@ -88,9 +88,11 @@ function setServerStatus(ok) {
   fill(document.getElementById('server-status'), h('span', { class: `dot ${ok ? 'ok' : 'err'}` }), ok ? 'server online' : 'server offline');
 }
 
-function setRunStatus(active) {
+function setRunStatus(active, questions = 0) {
   const el = document.getElementById('run-status');
-  fill(el, active.length ? h('a', { href: '#/' }, h('span', { class: 'dot run' }), `${active.length} agent${active.length > 1 ? 's' : ''} working`) : '');
+  fill(el,
+    active.length ? h('a', { href: '#/' }, h('span', { class: 'dot run' }), `${active.length} agent${active.length > 1 ? 's' : ''} working`) : null,
+    questions ? h('a', { href: '#/', class: 'q-status', title: 'Questions from your agents' }, `❓ ${questions} question${questions > 1 ? 's' : ''} for you`) : null);
 }
 
 function onRestarted(pid) {
@@ -116,7 +118,7 @@ async function poll() {
     if (state.down) { state.down = false; banner(null); }
     setServerStatus(true);
     const runs = await api('GET', '/api/runs', undefined, { quiet: true }).catch(() => null);
-    if (runs) setRunStatus(runs.active);
+    if (runs) setRunStatus(runs.active, runs.open_questions);
   } catch {
     state.down = true;
     setServerStatus(false);

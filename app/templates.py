@@ -13,7 +13,7 @@ template editor's suggestions, which depend on the fields filled in so far (see 
 import json
 import math
 import re
-from . import db, template_presets as presets
+from . import db, groups, template_presets as presets
 
 SLUG_RX = re.compile(r"^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$|^[a-z0-9]$")
 LIST_FIELDS = ("rules", "expertise", "skills", "subagents")
@@ -146,6 +146,9 @@ def usages() -> dict[str, list[dict]]:
     for t in db.query("SELECT slug, name, subagents FROM agent_templates"):
         for s in json.loads(t["subagents"]):
             out.setdefault(s, []).append({"template": t["name"], "symbol": symbol(t["slug"]), "as": "internal"})
+    for g in db.query("SELECT slug, name, members FROM agent_groups"):
+        for m in json.loads(g["members"]):
+            out.setdefault(m["template"], []).append({"group": g["name"], "symbol": f"#{g['slug']}", "as": "member"})
     return out
 
 
@@ -181,6 +184,7 @@ def save(fields: dict, tid: int | None = None) -> dict:
     slug = check_slug(fields.get("slug") or slugify(fields["name"]), tid)
     values = {
         "slug": slug, "name": fields["name"].strip(), "category": fields.get("category", "").strip(),
+        "area": fields.get("area", "").strip().lower(), "language": fields.get("language", "").strip().lower(),
         "description": fields.get("description", "").strip(),
         "role": fields.get("role", "").strip(), "instructions": fields.get("instructions", ""),
         "model": fields.get("model") or "", "effort": fields.get("effort") or "",
@@ -221,6 +225,12 @@ def _replace_refs(old: str, new: str | None) -> None:
             if old in refs:
                 refs = clean_list(new if s == old else s for s in refs if new or s != old)
                 conn.execute(f"UPDATE {table} SET subagents = ? WHERE id = ?", (json.dumps(refs), r["id"]))
+    for g in conn.execute("SELECT id, members FROM agent_groups").fetchall():
+        members = json.loads(g["members"])
+        if any(m["template"] == old for m in members):
+            members = ([{**m, "template": new} if m["template"] == old else m for m in members] if new
+                       else groups.without_template(members, old))
+            conn.execute("UPDATE agent_groups SET members = ? WHERE id = ?", (json.dumps(members), g["id"]))
 
 
 # ---------------------------------------------------------------- starter templates
@@ -240,26 +250,38 @@ def install_presets(slugs: list[str] | None = None) -> int:
     with db.transaction():
         for p in chosen:
             db._conn.execute(
-                "INSERT INTO agent_templates(slug, name, category, description, role, instructions, rules, expertise, "
-                "skills, subagents, model, effort, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (p["slug"], p["name"], p["category"], p["descriptions"][0], p["roles"][0], p["instructions"][0],
+                "INSERT INTO agent_templates(slug, name, category, area, language, description, role, instructions, "
+                "rules, expertise, skills, subagents, model, effort, created_at, updated_at) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (p["slug"], p["name"], p["category"], p["area"], p["language"], p["descriptions"][0], p["roles"][0], p["instructions"][0],
                  json.dumps(p["rules"]), json.dumps(p["expertise"]), json.dumps(p["skills"]),
                  json.dumps([s for s in p["subagents"] if s in known]), p.get("model", ""), p.get("effort", ""), ts, ts))
     return len(chosen)
 
 
 def seed_once() -> None:
-    """Install the starter templates the first time the server runs with this database."""
-    if not db.get_settings()["templates_seeded"]:
-        install_presets()
-        db.save_settings({"templates_seeded": True})
+    """Install the starter templates this database has not been offered yet (so templates added to the
+    library later arrive once, and deleted ones are not brought back), and fill in the functional area
+    and language of installed starter templates that predate those fields."""
+    settings = db.get_settings()
+    seen = set(settings["presets_seen"])
+    if not seen and settings["templates_seeded"]:
+        seen = {p["slug"] for p in presets.PRESETS if not p["language"]}   # the first library, installed before
+    new = [p["slug"] for p in presets.PRESETS if p["slug"] not in seen]
+    if new:
+        install_presets(new)
+    for p in presets.PRESETS:
+        db.execute("UPDATE agent_templates SET area = ?, language = ? WHERE slug = ? AND area = '' AND language = ''",
+                   (p["area"], p["language"], p["slug"]))
+    db.save_settings({"templates_seeded": True, "presets_seen": sorted(seen | set(new))})
 
 
 # ---------------------------------------------------------------- context-dependent suggestions
 
 # The template editor's fields, in order. Suggestions for a field depend only on the fields before it,
 # so choosing a category narrows the names, a name narrows descriptions and roles, and so on.
-FIELD_ORDER = ("category", "name", "description", "role", "expertise", "skills", "rules", "subagents", "instructions")
+FIELD_ORDER = ("category", "area", "language", "name", "description", "role", "expertise", "skills", "rules",
+               "subagents", "instructions")
 # How strongly each value a draft shares with a profile ties the two together.
 LIST_WEIGHTS = {"expertise": 2.5, "skills": 2.0, "rules": 1.5, "subagents": 1.5}
 LIMITS = {"name": 40, "description": 10, "role": 10, "expertise": 120, "skills": 120, "rules": 120, "instructions": 6}
@@ -310,13 +332,15 @@ def _profiles() -> list[dict]:
     rows = {t["slug"]: t for t in (_row(r) for r in db.query("SELECT * FROM agent_templates"))}
     out = []
     for p in presets.PRESETS:
-        prof = {"slug": p["slug"], "category": p["category"], "name": [p["name"], *p["aliases"]],
+        prof = {"slug": p["slug"], "category": p["category"], "area": p["area"], "language": p["language"],
+                "name": [p["name"], *p["aliases"]],
                 "description": list(p["descriptions"]), "role": list(p["roles"]), "instructions": list(p["instructions"]),
                 "model": p.get("model", ""), "effort": p.get("effort", ""),
                 **{k: list(p[k]) for k in LIST_FIELDS}}
         t = rows.pop(p["slug"], None)
         if t:   # the user's current values first, then the preset's alternatives
             prof["category"] = t["category"] or prof["category"]
+            prof["area"], prof["language"] = t["area"] or prof["area"], t["language"] or prof["language"]
             for key in ("name", "description", "role", "instructions"):
                 prof[key] = clean_list([t[key], *prof[key]])
             for key in LIST_FIELDS:
@@ -324,7 +348,8 @@ def _profiles() -> list[dict]:
             prof["model"], prof["effort"] = t["model"], t["effort"]
         out.append(prof)
     for t in rows.values():
-        out.append({"slug": t["slug"], "category": t["category"], "model": t["model"], "effort": t["effort"],
+        out.append({"slug": t["slug"], "category": t["category"], "area": t["area"], "language": t["language"],
+                    "model": t["model"], "effort": t["effort"],
                     **{k: clean_list([t[k]]) for k in ("name", "description", "role", "instructions")},
                     **{k: t[k] for k in LIST_FIELDS}})
     return out
@@ -336,6 +361,11 @@ def _weight(p: dict, draft: dict, upto: int, idf: dict[str, float]) -> float:
     w = 0.0
     if "category" in fields and draft["category"].strip():
         w += 4 if _norm(draft["category"]) == _norm(p["category"]) else 0
+    if "area" in fields and draft["area"]:
+        w += 5 if draft["area"] == p["area"] else 0
+    if "language" in fields and draft["language"]:
+        # Another language's specialist is a poor match; a language-neutral profile is neutral.
+        w += 6 if draft["language"] == p["language"] else (-3 if p["language"] else 0)
     if "name" in fields and draft["name"].strip():
         exact = _norm(draft["name"]) in map(_norm, p["name"])
         w += 12 if exact else 6 * _overlap(draft["name"], " ".join(p["name"]), idf)
@@ -359,7 +389,7 @@ def _ranked(profiles: list[dict], weights: list[float], key: str) -> list[dict]:
     for p, w in zip(profiles, weights):
         for i, value in enumerate(p[key]):
             k = _norm(value)
-            s = (w + 0.1) * 0.97 ** i
+            s = (max(w, 0.0) + 0.1) * 0.97 ** i
             shown.setdefault(k, value)
             score[k] = score.get(k, 0) + s
             if s > best.get(k, (-1, None))[0]:
@@ -383,14 +413,16 @@ def suggest(draft: dict) -> dict:
     own = parse_symbol(draft.get("slug", ""))
     profiles = _profiles()
     idf = _idf(profiles)
-    out = {"category": [{"value": c["name"], "hint": c["about"], "icon": c["icon"]} for c in presets.CATEGORIES]}
+    out = {"category": [{"value": c["name"], "hint": c["about"], "icon": c["icon"]} for c in presets.CATEGORIES],
+           "area": [{"value": a["id"], "label": a["name"], "icon": a["icon"]} for a in presets.AREAS],
+           "language": [{"value": l["id"], "label": l["name"]} for l in presets.LANGUAGES]}
     custom = {_norm(c["name"]) for c in presets.CATEGORIES}
     for p in profiles:
         if p["category"] and _norm(p["category"]) not in custom:
             custom.add(_norm(p["category"]))
             out["category"].append({"value": p["category"], "hint": "your category", "icon": "🏷"})
     for index, key in enumerate(FIELD_ORDER):
-        if key in ("category", "subagents"):
+        if key in ("category", "area", "language", "subagents"):
             continue
         weights = [_weight(p, draft, index, idf) for p in profiles]
         out[key] = _ranked(profiles, weights, key)
@@ -402,7 +434,7 @@ def suggest(draft: dict) -> dict:
     for p, w in zip(profiles, weights):
         for slug in p["subagents"]:
             if slug in score:
-                score[slug] += w + 0.1
+                score[slug] += max(w, 0.0) + 0.1
     out["subagents"] = [{"value": symbol(s), "label": templates[s]["name"],
                          "hint": templates[s]["description"] or templates[s]["role"]}
                         for s in sorted(score, key=lambda s: (-score[s], templates[s]["name"].lower()))]
@@ -414,7 +446,8 @@ def suggest(draft: dict) -> dict:
     if top is not None and weights[top] >= 4:
         p = profiles[top]
         out["best"] = {
-            "name": p["name"][0], "category": p["category"], "model": p["model"], "effort": p["effort"],
+            "name": p["name"][0], "category": p["category"], "area": p["area"], "language": p["language"],
+            "model": p["model"], "effort": p["effort"],
             **{k: (p[k][0] if p[k] else "") for k in ("description", "role", "instructions")},
             **{k: p[k] for k in ("expertise", "skills", "rules")},
             "subagents": [symbol(s) for s in p["subagents"] if s in templates],

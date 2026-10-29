@@ -86,7 +86,11 @@ export function h(tag, attrs, ...children) {
   for (const [k, v] of Object.entries(attrs || {})) {
     if (v == null || v === false) continue;
     if (k === 'class') el.className = v;
-    else if (k === 'style' && typeof v === 'object') Object.assign(el.style, v);
+    else if (k === 'style' && typeof v === 'object') {
+      for (const [prop, val] of Object.entries(v)) {
+        if (prop.startsWith('--')) el.style.setProperty(prop, val); else el.style[prop] = val;
+      }
+    }
     else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2).toLowerCase(), v);
     else if (k === 'html') el.innerHTML = v;
     else if (k === 'value') el.value = v;
@@ -302,7 +306,7 @@ export function fmtHours(hours) {
   return hours < 1 ? `${Math.round(hours * 60)} min` : `${+hours.toFixed(1)} h`;
 }
 
-export const STATUS_LABELS = { todo: 'To do', in_progress: 'In progress', blocked: 'Blocked', review: 'Review', done: 'Done' };
+export const STATUS_LABELS = { todo: 'To do', in_progress: 'In progress', blocked: 'Blocked', review: 'Review', done: 'Done', cancelled: 'Cancelled' };
 
 export function statusBadge(status) {
   return h('span', { class: `badge ${status}` }, STATUS_LABELS[status] || status);

@@ -96,6 +96,69 @@ TASK_TOOLS = [
           []),
 ]
 
+# Every project agent: collaborate with teammates and the user, and learn.
+TEAM_TOOLS = [
+    _tool("ask_agent",
+          "Consult a teammate: ask another agent of your project team a question and get its answer. Use it to "
+          "agree on interfaces, check an approach, get a quick review or draw on a teammate's expertise. The "
+          "teammate can read the repository but does not change it. Ask specific questions.",
+          {"agent": {"type": "string", "description": "The teammate's key (or name) from your team list."},
+           "question": {"type": "string", "description": "The question, with the context the teammate needs."}},
+          ["agent", "question"]),
+    _tool("ask_user",
+          "Ask the user a question and wait for the answer. Only for what only the user can decide or provide: "
+          "requirements, preferences, access or credentials, permission for risky or irreversible steps. Do not "
+          "ask about things you can find out yourself or decide reasonably; state your assumption instead. Your "
+          "work pauses until the user answers.",
+          {"question": {"type": "string", "description": "A clear, self-contained question."},
+           "options": {"type": "array", "items": {"type": "string"},
+                       "description": "Optional suggested answers the user can pick from."}},
+          ["question"]),
+    _tool("record_learning",
+          "Record a lesson learned so it is available in future work: a convention of this repository, a pitfall "
+          "and how to avoid it, a technique that worked, feedback from the user or a reviewer. One or two "
+          "concrete sentences. Record lessons before you finish a task.",
+          {"lesson": {"type": "string"},
+           "scope": {"type": "string", "enum": ["self", "team", "role"],
+                     "description": "self: for you in this project. team: for every agent of this project. role: "
+                                    "for every agent based on your template, in all projects (general know-how)."}},
+          ["lesson", "scope"]),
+]
+
+# Agents that others report to: plan, delegate and review.
+LEAD_TOOLS = [
+    _tool("create_subtasks",
+          "Break your task down: create sub-tasks and assign each to a member of your team below you (see the "
+          "team list). Give each a description with acceptance criteria. Returns the sub-task ids; run them with "
+          "delegate.",
+          {"subtasks": {"type": "array", "items": {
+              "type": "object",
+              "properties": {"title": {"type": "string"},
+                             "description": {"type": "string", "description": "What to do and the acceptance criteria."},
+                             "assignee": {"type": "string", "description": "Key (or name) of the team member."},
+                             "estimated_hours": {"type": "number"}},
+              "required": ["title", "description", "assignee"]}}},
+          ["subtasks"]),
+    _tool("delegate",
+          "Have the assignees work on sub-tasks and wait for their reports. Sub-tasks given together run in "
+          "parallel, so only combine independent sub-tasks that do not edit the same files; run dependent ones "
+          "one after the other. Call it again with a message to request changes, give feedback or pass on an answer.",
+          {"task_ids": {"type": "array", "items": {"type": "integer"}},
+           "message": {"type": "string", "description": "Instructions, feedback or answers for the assignees. "
+                                                        "Optional the first time."}},
+          ["task_ids"]),
+    _tool("review_subtask",
+          "Record your decision on a sub-task after reviewing its result: accept it (done), send it back for "
+          "changes (revise; then delegate it again with your feedback), mark it blocked, or cancel it.",
+          {"task_id": {"type": "integer"},
+           "decision": {"type": "string", "enum": ["accept", "revise", "block", "cancel"]},
+           "comment": {"type": "string", "description": "Reasoning or feedback for the assignee."}},
+          ["task_id", "decision"]),
+]
+
+# A teammate being consulted reads the repository but does not change it.
+CONSULT_TOOLS = [t for t in FILE_TOOLS if t["name"] in ("list_files", "read_file", "search_files")]
+
 DEV_TOOLS = [
     _tool("restart_server",
           "Restart the Agent Group web server so code changes take effect. A preflight check "
@@ -124,25 +187,39 @@ def validate(tool_def: dict, args) -> str | None:
     With eager input streaming the API does not validate tool input, and the SDK's
     tolerant parser can hand back a truncated object, so every call is checked here.
     """
-    schema = tool_def["input_schema"]
+    return _check_object(tool_def["input_schema"], args, "")
+
+
+def _is(value, type_: str) -> bool:
+    if isinstance(value, bool) and type_ in ("integer", "number"):
+        return False
+    return isinstance(value, _TYPES[type_])
+
+
+def _check_object(schema: dict, args, where: str) -> str | None:
     if not isinstance(args, dict):
-        return "tool input must be a JSON object"
+        return f"{where or 'tool input'} must be a JSON object"
     for key in schema.get("required", []):
         if key not in args:
-            return f"missing required field '{key}'"
+            return f"missing required field '{where}{key}'"
     for key, value in args.items():
         spec = schema["properties"].get(key)
+        name = f"{where}{key}"
         if spec is None:
-            return f"unknown field '{key}'"
-        expected = _TYPES[spec["type"]]
-        if isinstance(value, bool) and spec["type"] in ("integer", "number"):
-            return f"field '{key}' must be {spec['type']}"
-        if not isinstance(value, expected):
-            return f"field '{key}' must be {spec['type']}"
-        if spec["type"] == "array" and not all(isinstance(v, str) for v in value):
-            return f"field '{key}' must be an array of strings"
+            return f"unknown field '{name}'"
+        if not _is(value, spec["type"]):
+            return f"field '{name}' must be {spec['type']}"
+        if spec["type"] == "array":
+            items = spec.get("items", {"type": "string"})
+            for i, v in enumerate(value):
+                if not _is(v, items["type"]):
+                    return f"field '{name}' must be an array of {items['type']}s"
+                if items["type"] == "object":
+                    problem = _check_object(items, v, f"{name}[{i}].")
+                    if problem:
+                        return problem
         if "enum" in spec and value not in spec["enum"]:
-            return f"field '{key}' must be one of {spec['enum']}"
+            return f"field '{name}' must be one of {spec['enum']}"
     return None
 
 

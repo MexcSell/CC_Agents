@@ -1,7 +1,7 @@
 // Agent templates: the Templates page, the template editor, and the autocomplete widgets used by the
 // editor and by the project agent forms. A template is referred to by its symbol, "@" + slug.
 
-import { api, h, fill, field, toast, modal, confirmDialog, modelOptions, effortOptions } from './core.js';
+import { api, h, fill, go, field, toast, modal, confirmDialog, modelOptions, effortOptions } from './core.js';
 
 // ================================================================ autocomplete
 
@@ -216,11 +216,17 @@ export function agentTemplateFields(templates, { template = '', subagents = [], 
  * roles, the chosen expertise the skills, and so on (POST /api/templates/suggest).
  */
 function templateModal(template, { templates, onSaved, copy = false }) {
-  const t = template || { name: '', slug: '', category: '', description: '', role: '', instructions: '', rules: [], expertise: [], skills: [], subagents: [], model: '', effort: '' };
+  const t = template || { name: '', slug: '', category: '', area: '', language: '', description: '', role: '', instructions: '', rules: [], expertise: [], skills: [], subagents: [], model: '', effort: '' };
   const editing = template && !copy;
   let sugg = {};
 
   const category = h('input', { type: 'text', value: t.category || '', placeholder: 'Choose a category or type a new one' });
+  const area = h('select', { onchange: () => { renderHints(); refresh(0); } });
+  const language = h('select', { onchange: () => { renderHints(); refresh(0); } });
+  const fillSelect = (sel, items, none, current) => fill(sel, h('option', { value: '' }, none),
+    items.map(it => h('option', { value: it.value, selected: it.value === current }, `${it.icon ? it.icon + ' ' : ''}${it.label}`)));
+  fillSelect(area, [], '—', t.area);
+  fillSelect(language, [], '—', t.language);
   const name = h('input', { type: 'text', value: copy ? `${t.name} (copy)` : t.name, placeholder: 'e.g. Code Reviewer' });
   const slug = h('input', { type: 'text', class: 'mono', value: editing ? t.symbol : '', placeholder: '@code-reviewer' });
   const slugify = s => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
@@ -248,7 +254,8 @@ function templateModal(template, { templates, onSaved, copy = false }) {
 
   // ---- suggestions from the server, refreshed whenever a field changes
   const draft = () => ({
-    slug: slug.value, category: category.value, name: name.value, description: desc.value, role: role.value,
+    slug: slug.value, category: category.value, area: area.value || t.area || '', language: language.value || t.language || '',
+    name: name.value, description: desc.value, role: role.value,
     expertise: expertise.peekValues(), skills: skills.peekValues(), rules: rules.peekValues(), subagents: subagents.peekValues(),
   });
   let timer = null;
@@ -260,6 +267,8 @@ function templateModal(template, { templates, onSaved, copy = false }) {
     try { res = await api('POST', '/api/templates/suggest', draft(), { quiet: true }); } catch { return; }
     if (mine !== seq) return;
     sugg = res;
+    if (area.options.length === 1) fillSelect(area, res.area, 'Any functional area', t.area);
+    if (language.options.length === 1) fillSelect(language, res.language, 'Not language-specific', t.language);
     renderHints();
   };
   const refresh = (delay = 250) => { clearTimeout(timer); timer = setTimeout(load, delay); };
@@ -313,6 +322,8 @@ function templateModal(template, { templates, onSaved, copy = false }) {
     const b = sugg.best;
     if (!b) { toast('Choose a category and a name (or role) first; the suggestions build on them.', 'info'); return; }
     if (!category.value.trim()) category.value = b.category;
+    if (!area.value && b.area) area.value = b.area;
+    if (!language.value && b.language) language.value = b.language;
     if (!name.value.trim()) setText(name, b.name);
     if (!desc.value.trim()) desc.value = b.description;
     if (!role.value.trim()) role.value = b.role;
@@ -331,8 +342,9 @@ function templateModal(template, { templates, onSaved, copy = false }) {
     title: editing ? `Edit template ${t.symbol}` : 'New agent template',
     wide: true,
     body: h('div', { class: 'form-grid' },
-      h('div', { class: 'small muted', style: { marginTop: '-6px' } }, 'Each field suggests candidates based on the fields above it. Start with the category and name, or use “✨ Fill empty fields”.'),
+      h('div', { class: 'small muted', style: { marginTop: '-6px' } }, 'Each field suggests candidates based on the fields above it. Start with the category, functional area, language and name, or use “✨ Fill empty fields”.'),
       withHints(field('Category', category), 'category'),
+      h('div', { class: 'form-grid two' }, field('Functional area', area), field('Language', language)),
       h('div', { class: 'form-grid two' },
         withHints(field('Name', name), 'name'),
         field('Symbol', slug, 'How agents refer to this template, e.g. when you add it as an internal agent.')),
@@ -350,7 +362,8 @@ function templateModal(template, { templates, onSaved, copy = false }) {
         label: editing ? 'Save template' : 'Create template', kind: 'primary', onClick: async () => {
           if (!name.value.trim()) { toast('A name is required.', 'error'); return false; }
           const body = {
-            name: name.value, slug: slug.value.trim(), category: category.value, description: desc.value, role: role.value, instructions: instructions.value,
+            name: name.value, slug: slug.value.trim(), category: category.value, area: area.value, language: language.value,
+            description: desc.value, role: role.value, instructions: instructions.value,
             expertise: expertise.getValues(), skills: skills.getValues(), rules: rules.getValues(), subagents: subagents.getValues(),
             model: model.value, effort: effort.value,
           };
@@ -369,13 +382,20 @@ function templateModal(template, { templates, onSaved, copy = false }) {
 
 // ================================================================ page
 
-export async function templatesPage(view) {
+const pageTabs = sub => h('div', { class: 'tabs', style: { marginBottom: '14px' } },
+  [['', '🧩 Templates'], ['groups', '👥 Agent groups']].map(([key, label]) =>
+    h('button', { class: (sub || '') === key ? 'active' : '', onclick: () => go(key ? '#/templates/groups' : '#/templates') }, label)));
+
+export async function templatesPage(view, [sub]) {
   const page = h('div', { class: 'page' });
   view.append(page);
+  if (sub === 'groups') return groupsView(page);
   let templates = [];
-  let library = { categories: [], presets: [] };
+  let library = { categories: [], areas: [], languages: [], presets: [] };
   let query = '';
   let only = localStorage.getItem('tpl-category') || '';
+  let areaFilter = localStorage.getItem('tpl-area') || '';
+  let langFilter = localStorage.getItem('tpl-language') || '';
   const listEl = h('div');
   const filterEl = h('div', { class: 'row wrap', style: { gap: '6px', marginBottom: '14px' } });
   const restoreBtn = h('button', { onclick: () => installPresets() });
@@ -387,8 +407,9 @@ export async function templatesPage(view) {
   const reload = () => load(true);
   const edit = (t, copy = false) => templateModal(t, { templates, copy, onSaved: reload });
   const remove = async t => {
-    const uses = t.used_by.map(u => (u.project ? `• ${u.agent} in "${u.project}" (${u.as === 'template' ? 'based on it' : 'internal agent'})` : `• template ${u.symbol} (internal agent)`));
-    const msg = `Delete the template ${t.symbol} "${t.name}"?` + (uses.length ? `\n\nIt is used by:\n${uses.join('\n')}\n\nThese references are removed.` : '');
+    const uses = t.used_by.map(u => (u.project ? `• ${u.agent} in "${u.project}" (${u.as === 'template' ? 'based on it' : 'internal agent'})`
+      : u.group ? `• group ${u.symbol} (member)` : `• template ${u.symbol} (internal agent)`));
+    const msg = `Delete the template ${t.symbol} "${t.name}"?` + (uses.length ? `\n\nIt is used by:\n${uses.join('\n')}\n\nThese references are removed (group members based on it leave their group).` : '');
     if (!await confirmDialog(msg, { okLabel: 'Delete', danger: true })) return;
     await api('DELETE', `/api/templates/${t.id}`);
     toast('Template deleted', 'ok');
@@ -402,6 +423,8 @@ export async function templatesPage(view) {
     toast(`${res.installed} starter template(s) added`, 'ok');
     reload();
   };
+  const areaOf = id => library.areas.find(a => a.id === id);
+  const langOf = id => library.languages.find(l => l.id === id);
 
   const chipRow = (label, values) => (values.length
     ? h('div', { class: 'tpl-row' }, h('span', { class: 'lbl' }, label), h('div', { class: 'chip-list' }, values.slice(0, 4).map(v => h('span', { class: 'chip sm', title: v }, h('span', { class: 'txt' }, v))), values.length > 4 ? h('span', { class: 'small muted' }, `+${values.length - 4}`) : null))
@@ -412,6 +435,9 @@ export async function templatesPage(view) {
       h('button', { class: 'ghost icon sm', title: `Copy ${t.symbol}`, onclick: e => { e.stopPropagation(); navigator.clipboard?.writeText(t.symbol).then(() => toast(`${t.symbol} copied`, 'ok')); } }, '⧉'),
       h('button', { class: 'ghost icon sm', title: 'Duplicate', onclick: e => { e.stopPropagation(); edit(t, true); } }, '⎘'),
       h('button', { class: 'ghost icon sm', title: 'Delete', onclick: e => { e.stopPropagation(); remove(t); } }, '🗑')),
+    t.area || t.language ? h('div', { class: 'row small', style: { gap: '6px' } },
+      t.area && areaOf(t.area) ? h('span', { class: 'badge' }, `${areaOf(t.area).icon} ${areaOf(t.area).name}`) : null,
+      t.language ? h('span', { class: 'badge accent' }, langOf(t.language)?.name || t.language) : null) : null,
     t.description ? h('div', { class: 'small muted' }, t.description) : null,
     t.role ? h('div', { class: 'small' }, h('b', {}, 'Role: '), t.role) : null,
     chipRow('Expertise', t.expertise),
@@ -437,7 +463,11 @@ export async function templatesPage(view) {
     }
     return known.filter(g => g.items.length);
   };
-  const matches = t => !query || [t.name, t.symbol, t.description, t.role, ...t.expertise, ...t.skills].join(' ').toLowerCase().includes(query);
+  const matches = t => (!areaFilter || t.area === areaFilter) && (!langFilter || t.language === langFilter)
+    && (!query || [t.name, t.symbol, t.description, t.role, ...t.expertise, ...t.skills].join(' ').toLowerCase().includes(query));
+  const select = (value, none, items, key, set) => h('select', {
+    style: { width: 'auto' }, onchange: e => { set(e.target.value); if (e.target.value) localStorage.setItem(key, e.target.value); else localStorage.removeItem(key); render(); },
+  }, h('option', { value: '' }, none), items.map(it => h('option', { value: it.id, selected: it.id === value }, `${it.icon ? it.icon + ' ' : ''}${it.name}`)));
   const render = () => {
     const all = groups();
     if (only && !all.some(g => g.name === only)) only = '';
@@ -446,6 +476,9 @@ export async function templatesPage(view) {
     fill(filterEl, all.length > 1 ? [
       h('button', { class: `sm${only ? '' : ' primary'}`, onclick: () => { only = ''; localStorage.removeItem('tpl-category'); render(); } }, `All (${templates.length})`),
       all.map(g => h('button', { class: `sm${only === g.name ? ' primary' : ''}`, onclick: () => { only = g.name; localStorage.setItem('tpl-category', only); render(); } }, `${g.icon} ${g.name} (${g.items.length})`)),
+      h('div', { class: 'grow' }),
+      select(areaFilter, 'All functional areas', library.areas.filter(a => templates.some(t => t.area === a.id)), 'tpl-area', v => { areaFilter = v; }),
+      select(langFilter, 'All languages', library.languages.filter(l => templates.some(t => t.language === l.id)), 'tpl-language', v => { langFilter = v; }),
     ] : null);
     const shown = all.filter(g => !only || g.name === only).map(g => ({ ...g, items: g.items.filter(matches) })).filter(g => g.items.length);
     fill(listEl, !templates.length
@@ -464,8 +497,180 @@ export async function templatesPage(view) {
   fill(page,
     h('div', { class: 'page-head' }, h('h1', {}, 'Agent templates'), h('div', { class: 'spacer' }), search, restoreBtn,
       h('button', { class: 'primary', onclick: () => edit(null) }, '+ New template')),
-    h('p', { class: 'muted', style: { marginTop: 0 } }, 'Reusable agent profiles: role, areas of expertise, skills and rules. Each template has a symbol such as ',
-      h('code', {}, '@code-reviewer'), '. Use it to base a project agent on the template, or to give an agent internal agents it can delegate to.'),
+    pageTabs(''),
+    h('p', { class: 'muted', style: { marginTop: 0 } }, 'Reusable agent profiles by functional area and language: role, areas of expertise, skills and rules. Each template has a symbol such as ',
+      h('code', {}, '@python-developer'), '. Agent groups combine templates into teams; you can also base a single project agent on a template.'),
     filterEl, listEl);
+  await load(false);
+}
+
+// ================================================================ agent groups
+
+/** Add (group null), edit or copy an agent group: its members, each with a template, a name and a lead. */
+function groupModal(group, { templates, onSaved, copy = false }) {
+  const editing = group && !copy;
+  const g = group || { name: '', slug: '', category: '', description: '', members: [] };
+  let n = 0;
+  const newKey = () => `m${Date.now().toString(36)}${n++}`;
+  let members = g.members.map(m => ({ key: m.key, template: m.template, name: m.name, parent: m.parent }));
+  const name = h('input', { type: 'text', value: copy ? `${g.name} (copy)` : g.name, placeholder: 'e.g. Python Web Team' });
+  const slug = h('input', { type: 'text', class: 'mono', value: editing ? g.symbol : '', placeholder: '#python-web-team' });
+  const slugify = s => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+  const autoSlug = () => { if (!slug.dataset.touched) slug.value = name.value.trim() ? `#${slugify(name.value)}` : ''; };
+  name.addEventListener('input', autoSlug);
+  slug.addEventListener('input', () => { slug.dataset.touched = '1'; });
+  if (!editing) autoSlug();
+  const category = h('input', { type: 'text', value: g.category, placeholder: 'e.g. Language teams' });
+  const desc = h('input', { type: 'text', value: g.description, placeholder: 'What this team is good for' });
+  const rows = h('div', { class: 'member-rows' });
+  const byTemplate = slug => templates.find(t => t.slug === slug.replace(/^@/, '').toLowerCase());
+
+  // Members in hierarchy order with their depth; members whose manager is missing go under the lead.
+  const ordered = () => {
+    const keys = new Set(members.map(m => m.key));
+    const root = members.find(m => !m.parent || !keys.has(m.parent)) || members[0];
+    const out = [];
+    const walk = (m, depth) => { out.push({ m, depth }); members.filter(c => c !== m && c.parent === m.key).forEach(c => walk(c, depth + 1)); };
+    if (root) { root.parent = null; walk(root, 0); }
+    members.filter(m => !out.some(o => o.m === m)).forEach(m => { m.parent = root.key; out.push({ m, depth: 1 }); });
+    return out;
+  };
+  const below = m => {
+    const set = new Set([m.key]);
+    let grew = true;
+    while (grew) { grew = false; for (const x of members) if (set.has(x.parent) && !set.has(x.key)) { set.add(x.key); grew = true; } }
+    return set;
+  };
+  const render = () => {
+    const list = ordered();
+    fill(rows, list.length ? list.map(({ m, depth }) => {
+      const tplInput = h('input', { type: 'text', class: 'mono', value: m.template ? `@${m.template}` : '', placeholder: '@template' });
+      autocomplete(tplInput, {
+        source: q => rankMatches(templateItems(templates), q, 12),
+        onPick: it => {
+          const t = byTemplate(it.value);
+          if (t && (!m.name || m.name === byTemplate(`@${m.template}`)?.name)) m.name = t.name;
+          m.template = t?.slug || '';
+          render();
+        },
+      });
+      tplInput.addEventListener('change', () => { const t = byTemplate(tplInput.value); if (t) { m.template = t.slug; render(); } });
+      const nameInput = h('input', { type: 'text', value: m.name, placeholder: 'Name', oninput: e => { m.name = e.target.value; } });
+      const exclude = below(m);
+      const parent = h('select', {
+        onchange: e => {
+          const v = e.target.value;
+          if (!v) {  // this member becomes the lead; the old lead reports to it
+            const old = members.find(x => !x.parent);
+            if (old && old !== m) old.parent = m.key;
+            m.parent = null;
+          } else m.parent = v;
+          render();
+        },
+      }, h('option', { value: '', selected: !m.parent }, '— leads the group'),
+      list.filter(o => !exclude.has(o.m.key)).map(o => h('option', { value: o.m.key, selected: o.m.key === m.parent }, `reports to ${o.m.name || '(unnamed)'}`)));
+      return h('div', { class: 'member-row', style: { '--depth': depth } },
+        h('span', { class: 'tn-ico' }, depth === 0 ? '👑' : '🤖'), nameInput, tplInput, parent,
+        h('button', { type: 'button', class: 'ghost icon sm', title: 'Add a member reporting to this one', onclick: () => { members.push({ key: newKey(), template: '', name: '', parent: m.key }); render(); } }, '+'),
+        h('button', {
+          type: 'button', class: 'ghost icon sm', title: 'Remove', onclick: () => {
+            members = members.filter(x => x !== m);
+            members.forEach(x => { if (x.parent === m.key) x.parent = m.parent; });
+            render();
+          },
+        }, '✕'));
+    }) : h('div', { class: 'small muted' }, 'No members yet. Add the lead first.'));
+  };
+  render();
+  modal({
+    title: editing ? `Edit group ${g.symbol}` : 'New agent group',
+    wide: true,
+    body: h('div', { class: 'form-grid' },
+      h('div', { class: 'form-grid two' }, field('Name', name), field('Symbol', slug, 'How you refer to the group, e.g. when you register a project.')),
+      h('div', { class: 'form-grid two' }, field('Category', category), field('Description', desc)),
+      h('div', { class: 'field' }, 'Members',
+        h('span', { class: 'hint' }, 'One member leads the group and receives the project’s tasks; the others report to a member above them. Leads delegate sub-tasks to the members below them.'),
+        rows,
+        h('div', {}, h('button', { type: 'button', class: 'sm', onclick: () => { members.push({ key: newKey(), template: '', name: '', parent: ordered()[0]?.m.key || null }); render(); } }, '+ Add member')))),
+    actions: [{
+      label: editing ? 'Save group' : 'Create group', kind: 'primary', onClick: async () => {
+        if (!name.value.trim()) { toast('A name is required.', 'error'); return false; }
+        const body = { name: name.value, slug: slug.value.trim(), category: category.value, description: desc.value,
+          members: ordered().map(({ m }) => ({ key: m.key, template: m.template, name: m.name, parent: m.parent })) };
+        try {
+          const saved = editing ? await api('PUT', `/api/groups/${g.id}`, body) : await api('POST', '/api/groups', body);
+          toast(`Group ${saved.symbol} saved`, 'ok');
+          onSaved(saved);
+        } catch { return false; }
+      },
+    }],
+  });
+  setTimeout(() => name.focus(), 30);
+}
+
+async function groupsView(page) {
+  let groups = [];
+  let templates = [];
+  let presets = [];
+  let query = '';
+  const listEl = h('div');
+  const restoreBtn = h('button', { onclick: () => installPresets() });
+  const load = async quiet => {
+    [groups, templates, presets] = await Promise.all([api('GET', '/api/groups', undefined, { quiet }), api('GET', '/api/templates', undefined, { quiet }),
+      api('GET', '/api/groups/presets', undefined, { quiet })]);
+    render();
+  };
+  const reload = () => load(true);
+  const edit = (g, copy = false) => groupModal(g, { templates, copy, onSaved: reload });
+  const remove = async g => {
+    if (!await confirmDialog(`Delete the group ${g.symbol} "${g.name}"?\n\nProjects created from it keep their teams.`, { okLabel: 'Delete', danger: true })) return;
+    await api('DELETE', `/api/groups/${g.id}`);
+    toast('Group deleted', 'ok');
+    reload();
+  };
+  const missing = () => presets.filter(p => !p.installed);
+  const installPresets = async () => {
+    const names = missing().map(p => p.name);
+    if (!await confirmDialog(`Add ${names.length} starter group(s)?\n\n${names.join(', ')}`, { okLabel: 'Add', title: 'Starter groups' })) return;
+    const res = await api('POST', '/api/groups/presets/install', {});
+    toast(`${res.installed} starter group(s) added`, 'ok');
+    reload();
+  };
+  const tree = members => h('div', { class: 'team-tree compact' }, members.map(m => h('div', { class: `team-node${m.depth === 0 ? ' lead' : ''}`, style: { '--depth': m.depth } },
+    h('span', { class: 'tn-ico' }, m.depth === 0 ? '👑' : '🤖'),
+    h('span', { class: 'grow ellipsis', title: m.role }, h('b', {}, m.name), ' ', h('code', { class: 'sym' }, `@${m.template}`)))));
+  const card = g => h('div', { class: 'card tpl-card', onclick: () => edit(g) },
+    h('div', { class: 'row' },
+      h('div', { class: 'grow', style: { minWidth: 0 } }, h('h2', { class: 'ellipsis', style: { margin: 0 } }, g.name), h('code', { class: 'sym' }, g.symbol)),
+      h('button', { class: 'ghost icon sm', title: 'Duplicate', onclick: e => { e.stopPropagation(); edit(g, true); } }, '⎘'),
+      h('button', { class: 'ghost icon sm', title: 'Delete', onclick: e => { e.stopPropagation(); remove(g); } }, '🗑')),
+    g.description ? h('div', { class: 'small muted' }, g.description) : null,
+    tree(g.members),
+    h('div', { class: 'row small muted', style: { marginTop: 'auto' } },
+      h('span', { class: 'grow' }, `👥 ${g.members.length} agents`),
+      h('a', { href: `#/projects?new=1&group=${g.slug}`, onclick: e => e.stopPropagation() }, 'New project with this team →')));
+  const matches = g => !query || [g.name, g.symbol, g.description, g.category, ...g.members.flatMap(m => [m.name, m.template])].join(' ').toLowerCase().includes(query);
+  const render = () => {
+    restoreBtn.hidden = !missing().length;
+    fill(restoreBtn, `＋ Starter groups (${missing().length})`);
+    const cats = [...new Set(groups.map(g => g.category || 'Other'))];
+    const shown = cats.map(c => ({ c, items: groups.filter(g => (g.category || 'Other') === c && matches(g)) })).filter(x => x.items.length);
+    fill(listEl, !groups.length
+      ? h('div', { class: 'card empty' }, h('div', { class: 'big' }, '👥'), h('p', {}, 'No agent groups yet.'),
+        h('div', { class: 'row', style: { justifyContent: 'center' } },
+          missing().length ? h('button', { class: 'primary', onclick: installPresets }, `Add ${missing().length} starter groups`) : null,
+          h('button', { onclick: () => edit(null) }, 'Create a group')))
+      : shown.length ? shown.map(({ c, items }) => h('section', { class: 'tpl-group' },
+        h('h3', {}, c, h('span', { class: 'muted small' }, ` · ${items.length}`)), h('div', { class: 'cards' }, items.map(card))))
+        : h('div', { class: 'card empty small' }, 'No groups match.'));
+  };
+  const search = h('input', { type: 'text', placeholder: 'Search groups…', style: { width: '220px' }, oninput: e => { query = e.target.value.trim().toLowerCase(); render(); } });
+  fill(page,
+    h('div', { class: 'page-head' }, h('h1', {}, 'Agent groups'), h('div', { class: 'spacer' }), search, restoreBtn,
+      h('button', { class: 'primary', onclick: () => edit(null) }, '+ New group')),
+    pageTabs('groups'),
+    h('p', { class: 'muted', style: { marginTop: 0 } }, 'Teams of agent templates with a hierarchy, such as ', h('code', {}, '#python-team'),
+      '. Registering a project with a group creates the whole team. The lead receives your tasks, breaks them into sub-tasks and delegates them down the hierarchy; the agents consult each other, ask you when only you can decide, and record what they learn.'),
+    listEl);
   await load(false);
 }

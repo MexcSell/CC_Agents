@@ -7,6 +7,7 @@ import {
 import { ConversationView } from './conversation.js';
 import { FileExplorer, pickDirectory } from './files.js';
 import { agentTemplateFields } from './templates.js';
+import { applyTemplate, teamTab, knowledgeTab, questionsCard, discussionCard, groupPicker } from './team.js';
 
 const runDot = () => h('span', { class: 'dot run', title: 'Agent working' });
 
@@ -38,6 +39,8 @@ export async function dashboardPage(view) {
     h('span', { class: 'lbl' }, label), h('span', { class: 'num' }, num), sub ? h('span', { class: 'small muted' }, sub) : null);
   const render = async () => {
     const d = await api('GET', '/api/dashboard', undefined, { quiet: true });
+    const typing = document.activeElement;
+    if (page.contains(typing) && typing.tagName === 'TEXTAREA' && typing.value) return;  // an answer is being written
     const t = d.tasks;
     const total = Object.values(t).reduce((a, b) => a + b, 0);
     fill(page,
@@ -49,6 +52,7 @@ export async function dashboardPage(view) {
         ? ['Claude Code is not logged in on this server. Run ', h('code', {}, 'claude'), ' in a terminal on the server and log in, or ',
           h('a', { href: '#/settings' }, 'switch to an API key in Settings'), '.']
         : ['No Anthropic API key is configured yet. ', h('a', { href: '#/settings' }, 'Add one in Settings'), ' so the agents can talk to Claude.']),
+      d.questions.length ? h('div', { style: { marginBottom: '16px' } }, questionsCard(d.questions, { onChange: render })) : null,
       h('div', { class: 'cards', style: { marginBottom: '16px' } },
         stat('Topics', d.topics, '#/chat'),
         stat('Conversations', d.conversations, '#/chat'),
@@ -69,8 +73,8 @@ export async function dashboardPage(view) {
       h('div', { class: 'card', style: { marginTop: '14px' } }, h('h2', {}, 'How Agent Group works'),
         h('ul', { style: { margin: 0, paddingLeft: '18px', lineHeight: 1.8 } },
           h('li', {}, h('b', {}, 'Chat: '), 'create topics and hold conversations with Claude about them. History is stored; delete single conversations or clear a topic.'),
-          h('li', {}, h('b', {}, 'Projects: '), 'register a project with its repository folder. Each project has its own agent; assign tasks and it carries them out, reporting estimate, progress, insights and next actions.'),
-          h('li', {}, h('b', {}, 'Templates: '), 'define reusable agent profiles (role, expertise, skills, rules) with a symbol like @code-reviewer, then base project agents on them or add them as internal agents.'),
+          h('li', {}, h('b', {}, 'Projects: '), 'register a project with its repository folder and an agent group. The team’s lead breaks each task into sub-tasks and delegates them; the agents consult each other, ask you when only you can decide, report estimate, progress, insights and next actions, and record what they learn.'),
+          h('li', {}, h('b', {}, 'Templates & groups: '), 'reusable agent profiles by functional area and language (symbols like @python-developer), and hierarchical agent groups (like #python-team) that become a project’s team.'),
           h('li', {}, h('b', {}, 'Files: '), 'browse the whole file system or a project repository: create, open, edit, move and delete files.'),
           h('li', {}, h('b', {}, 'Developer: '), 'an agent that develops and modifies this website itself and restarts it, with automatic code snapshots.'))));
   };
@@ -417,17 +421,8 @@ function showServerLog() {
 
 // ================================================================ projects
 
-// Fills a project agent form from a chosen template: its role when the role is still empty, and its
-// default model and effort.
-const applyTemplate = (t, { role, model, effort }) => {
-  if (!t) return;
-  if (!role.value.trim() && t.role) role.value = t.role;
-  if (t.model) model.value = t.model;
-  if (t.effort) effort.value = t.effort;
-};
-
-async function registerProjectModal({ template = '' } = {}) {
-  const [settings, templates] = await Promise.all([api('GET', '/api/settings'), api('GET', '/api/templates')]);
+async function registerProjectModal({ template = '', group = '' } = {}) {
+  const [settings, templates, groups] = await Promise.all([api('GET', '/api/settings'), api('GET', '/api/templates'), api('GET', '/api/groups')]);
   const home = '/home';
   const name = h('input', { type: 'text', placeholder: 'e.g. Website redesign' });
   const desc = h('textarea', { rows: 3, placeholder: 'Goal and context of the project' });
@@ -449,6 +444,31 @@ async function registerProjectModal({ template = '' } = {}) {
   const effort = h('select', {}, effortOptions(settings.project_effort));
   const tpl = agentTemplateFields(templates, { template, onTemplate: t => applyTemplate(t, { role, model, effort }) });
   applyTemplate(templates.find(t => t.slug === template), { role, model, effort });
+  // A team from an agent group, or a single agent.
+  let mode = template || !groups.length ? 'single' : 'team';
+  const picker = groupPicker(groups, { value: group });
+  const teamModel = h('select', {}, modelOptions(settings.project_model));
+  const teamEffort = h('select', {}, effortOptions(settings.project_effort));
+  const teamSection = h('div', { class: 'form-grid' },
+    field('Agent group', picker.input, 'The whole team is created as the project’s agents. Tasks you add go to its lead, who breaks them down and delegates to the team. You can change the team later.'),
+    picker.preview,
+    h('div', { class: 'form-grid two' },
+      field('Default model', teamModel, 'For agents whose template has no model of its own.'),
+      field('Default effort', teamEffort)));
+  const singleSection = h('div', { class: 'form-grid' },
+    tpl.templateField,
+    h('div', { class: 'form-grid two' }, field('Agent name', agentName), field('Role', role)),
+    field('Instructions', instructions),
+    tpl.subagentsField,
+    h('div', { class: 'form-grid two' }, field('Model', model), field('Effort', effort, 'Higher effort = deeper reasoning, more tokens.')));
+  const modeBtns = h('div', { class: 'seg' });
+  const showMode = () => {
+    teamSection.hidden = mode !== 'team';
+    singleSection.hidden = mode !== 'single';
+    fill(modeBtns, [['team', `👥 Agent group (${groups.length})`], ['single', '🤖 Single agent']].map(([k, label]) =>
+      h('button', { type: 'button', class: mode === k ? 'active' : '', onclick: () => { mode = k; showMode(); } }, label)));
+  };
+  showMode();
   modal({
     title: 'Register a project',
     wide: true,
@@ -457,22 +477,21 @@ async function registerProjectModal({ template = '' } = {}) {
       field('Description', desc),
       h('label', { class: 'field' }, 'Repository folder',
         h('div', { class: 'row' }, repo, browse),
-        h('span', { class: 'hint' }, 'The folder the project and its agent work in. The agent’s file tools and commands are confined to it.')),
+        h('span', { class: 'hint' }, 'The folder the project’s agents work in. Their file tools and commands are confined to it.')),
       h('label', { class: 'check' }, create, 'Create the folder if it does not exist'),
-      h('h3', { style: { margin: '6px 0 0' } }, '🤖 Project agent'),
-      h('div', { class: 'small muted', style: { marginTop: '-8px' } }, 'Tasks you create in this project are assigned to this agent, which carries them out.'),
-      tpl.templateField,
-      h('div', { class: 'form-grid two' }, field('Agent name', agentName), field('Role', role)),
-      field('Instructions', instructions),
-      tpl.subagentsField,
-      h('div', { class: 'form-grid two' }, field('Model', model), field('Effort', effort, 'Higher effort = deeper reasoning, more tokens.'))),
+      h('div', { class: 'row' }, h('h3', { class: 'grow', style: { margin: '6px 0 0' } }, '🤖 Agents'), modeBtns),
+      teamSection,
+      singleSection),
     actions: [{
       label: 'Register project', kind: 'primary', onClick: async () => {
         if (!name.value.trim() || !repo.value.trim()) { toast('Name and repository folder are required.', 'error'); return false; }
+        if (mode === 'team' && !picker.group()) { toast('Choose an agent group, or switch to a single agent.', 'error'); return false; }
         try {
           const p = await api('POST', '/api/projects', {
             name: name.value, description: desc.value, repo_path: repo.value.trim(), create_repo: create.checked,
-            agent: { name: agentName.value || 'Project Agent', role: role.value, instructions: instructions.value, model: model.value, effort: effort.value, ...tpl.get() },
+            group: mode === 'team' ? picker.get() : '',
+            agent: mode === 'team' ? { name: 'Lead', model: teamModel.value, effort: teamEffort.value }
+              : { name: agentName.value || 'Project Agent', role: role.value, instructions: instructions.value, model: model.value, effort: effort.value, ...tpl.get() },
           });
           toast(`Project "${p.name}" registered`, 'ok');
           go(`#/projects/${p.id}`);
@@ -491,7 +510,9 @@ export async function projectsPage(view, _params, query) {
     h('div', { class: 'row' }, h('h2', { class: 'grow ellipsis', style: { margin: 0 } }, p.name), p.running ? h('span', { class: 'badge accent' }, runDot(), `${p.running} running`) : null),
     p.description ? h('div', { class: 'muted small', style: { display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' } }, p.description) : null,
     h('div', { class: 'path' }, '📁 ', p.repo_path, p.repo_exists ? '' : '  ⚠ missing'),
-    h('div', { class: 'small' }, '🤖 ', h('b', {}, p.agent?.name || '—'), p.agent?.template ? [' ', h('code', { class: 'sym' }, `@${p.agent.template}`)] : null, h('span', { class: 'muted' }, ` · ${p.agent?.model || ''}`)),
+    h('div', { class: 'row small', style: { gap: '6px', flexWrap: 'wrap' } }, '👑 ', h('b', {}, p.agent?.name || '—'), p.agent?.template ? h('code', { class: 'sym' }, `@${p.agent.template}`) : null,
+      h('span', { class: 'muted' }, `· 👥 ${p.agent_count} agent${p.agent_count === 1 ? '' : 's'}`),
+      p.open_questions ? h('span', { class: 'badge review', title: 'Questions for you' }, `❓ ${p.open_questions}`) : null),
     progressBar(Math.round(p.stats.avg_progress || 0), p.stats.total > 0 && p.stats.done === p.stats.total),
     h('div', { class: 'row small muted' },
       h('span', {}, `${p.stats.done}/${p.stats.total} tasks done`),
@@ -502,16 +523,17 @@ export async function projectsPage(view, _params, query) {
       h('button', { class: 'primary', onclick: registerProjectModal }, '+ Register project')),
     projects.length ? h('div', { class: 'cards' }, projects.map(card))
       : h('div', { class: 'card empty' }, h('div', { class: 'big' }, '📋'),
-        h('p', {}, 'Register a project with its repository folder. It gets its own agent: assign tasks and the agent carries them out.'),
+        h('p', {}, 'Register a project with its repository folder and an agent group: the team’s lead breaks your tasks down and its agents carry them out.'),
         h('button', { class: 'primary', onclick: registerProjectModal }, 'Register your first project')));
   if (query.get('new')) {
     history.replaceState(null, '', '#/projects');
-    registerProjectModal({ template: query.get('template') || '' });
+    registerProjectModal({ template: query.get('template') || '', group: query.get('group') || '' });
   }
 }
 
 export async function projectPage(view, [pidParam, tab = 'tasks', taskParam]) {
   const pid = +pidParam;
+  if (tab === 'agent') tab = 'team';
   let project = await api('GET', `/api/projects/${pid}`);
   const page = h('div', { class: 'page', style: { maxWidth: '1400px' } });
   const header = h('div');
@@ -521,14 +543,13 @@ export async function projectPage(view, [pidParam, tab = 'tasks', taskParam]) {
     h('div', { class: 'small', style: { marginBottom: '6px' } }, h('a', { href: '#/projects' }, '← Projects')),
     h('div', { class: 'page-head', style: { marginBottom: '8px' } },
       h('h1', {}, project.name),
-      h('span', { class: 'badge accent', title: `${project.agent.model} · effort ${project.agent.effort}` }, `🤖 ${project.agent.name}`),
-      project.agent.template ? h('code', { class: 'sym', title: 'Agent template' }, `@${project.agent.template}`) : null,
-      project.agent.subagents.length ? h('span', { class: 'small muted', title: 'Internal agents' }, '🤝 ', project.agent.subagents.map(s => `@${s}`).join(' ')) : null,
+      h('span', { class: 'badge accent', title: `Lead · ${project.agent.model} · effort ${project.agent.effort}` }, `👑 ${project.agent.name}`),
+      h('a', { class: 'badge', href: `#/projects/${pid}/team`, title: project.agents.map(a => `${'  '.repeat(a.depth)}${a.name}`).join('\n') }, `👥 ${project.agents.length} agent${project.agents.length === 1 ? '' : 's'}`),
       h('div', { class: 'spacer' }),
       h('a', { class: 'mono small', href: `#/projects/${pid}/files`, title: 'Open the repository' }, `📁 ${project.repo_path}`)),
-    project.repo_exists ? null : h('div', { class: 'notice warn', style: { marginBottom: '10px' } }, `The repository folder ${project.repo_path} does not exist. Fix it under "Agent & settings".`),
+    project.repo_exists ? null : h('div', { class: 'notice warn', style: { marginBottom: '10px' } }, `The repository folder ${project.repo_path} does not exist. Fix it under "Team & settings".`),
     project.description ? h('div', { class: 'muted', style: { marginBottom: '10px' } }, project.description) : null,
-    h('div', { class: 'tabs' }, [['tasks', '✅ Tasks'], ['files', '🗂 Repository files'], ['agent', '🤖 Agent & settings']].map(([key, label]) =>
+    h('div', { class: 'tabs' }, [['tasks', '✅ Tasks'], ['team', '👥 Team & settings'], ['knowledge', '🧠 Knowledge'], ['files', '🗂 Repository files']].map(([key, label]) =>
       h('button', { class: tab === key ? 'active' : '', onclick: () => go(`#/projects/${pid}/${key}`) }, label))));
   renderHeader();
   page.append(header, body);
@@ -540,8 +561,12 @@ export async function projectPage(view, [pidParam, tab = 'tasks', taskParam]) {
     const fx = new FileExplorer(host, { root: project.repo_path, start: project.repo_path });
     return () => fx.dispose();
   }
-  if (tab === 'agent') {
-    await agentSettings(body, project, p => { project = p; renderHeader(); });
+  if (tab === 'team') {
+    await teamTab(body, project, p => { project = { ...project, ...p }; renderHeader(); });
+    return;
+  }
+  if (tab === 'knowledge') {
+    await knowledgeTab(body, project);
     return;
   }
   const tasks = await tasksTab(body, project, taskParam ? +taskParam : null);
@@ -552,79 +577,21 @@ export async function projectPage(view, [pidParam, tab = 'tasks', taskParam]) {
   };
 }
 
-async function agentSettings(el, project, onSaved) {
-  const a = project.agent;
-  const templates = await api('GET', '/api/templates');
-  const agentName = h('input', { type: 'text', value: a.name });
-  const role = h('input', { type: 'text', value: a.role, placeholder: 'e.g. Senior full-stack developer' });
-  const instructions = h('textarea', { rows: 6, value: a.instructions, placeholder: 'Conventions, constraints and preferences for this agent' });
-  const model = h('select', {}, modelOptions(a.model));
-  const effort = h('select', {}, effortOptions(a.effort));
-  const tpl = agentTemplateFields(templates, { template: a.template, subagents: a.subagents, onTemplate: t => applyTemplate(t, { role, model, effort }) });
-  const name = h('input', { type: 'text', value: project.name });
-  const desc = h('textarea', { rows: 3, value: project.description });
-  const repo = h('input', { type: 'text', class: 'mono', value: project.repo_path });
-  const create = h('input', { type: 'checkbox' });
-  el.append(h('div', { class: 'two-col', style: { alignItems: 'start' } },
-    h('div', { class: 'card form-grid' },
-      h('h2', { style: { margin: 0 } }, '🤖 Project agent'),
-      h('div', { class: 'small muted' }, 'Every task in this project is assigned to this agent. Changes apply from the next agent run.'),
-      tpl.templateField,
-      h('div', { class: 'form-grid two' }, field('Name', agentName), field('Role', role)),
-      field('Instructions', instructions),
-      tpl.subagentsField,
-      h('div', { class: 'form-grid two' }, field('Model', model), field('Effort', effort)),
-      h('div', {}, h('button', {
-        class: 'primary', onclick: async () => {
-          const p = await api('PUT', `/api/projects/${project.id}/agent`, { name: agentName.value, role: role.value, instructions: instructions.value, model: model.value, effort: effort.value, ...tpl.get() });
-          toast('Agent saved', 'ok');
-          onSaved(p);
-        },
-      }, 'Save agent'))),
-    h('div', { class: 'stack' },
-      h('div', { class: 'card form-grid' },
-        h('h2', { style: { margin: 0 } }, 'Project'),
-        field('Name', name),
-        field('Description', desc),
-        h('label', { class: 'field' }, 'Repository folder', h('div', { class: 'row' }, repo, h('button', {
-          onclick: async () => {
-            const picked = await pickDirectory({ title: 'Choose the project repository', start: repo.value || '/', okLabel: 'Use this folder' });
-            if (picked) repo.value = picked;
-          },
-        }, '📁 Browse…'))),
-        h('label', { class: 'check' }, create, 'Create the folder if it does not exist'),
-        h('div', {}, h('button', {
-          class: 'primary', onclick: async () => {
-            const p = await api('PUT', `/api/projects/${project.id}`, { name: name.value, description: desc.value, repo_path: repo.value, create_repo: create.checked });
-            toast('Project saved', 'ok');
-            onSaved({ ...p, repo_exists: true });
-          },
-        }, 'Save project'))),
-      h('div', { class: 'card stack' },
-        h('h2', { style: { margin: 0 } }, 'Unregister project'),
-        h('div', { class: 'small muted' }, 'Removes the project, its agent, tasks and agent logs from Agent Group. Files in the repository are not touched.'),
-        h('div', {}, h('button', {
-          class: 'danger', onclick: async () => {
-            if (!await confirmDialog(`Unregister "${project.name}"? Its tasks and agent logs are deleted; the repository files stay.`, { okLabel: 'Unregister', danger: true })) return;
-            await api('DELETE', `/api/projects/${project.id}`);
-            toast('Project unregistered', 'ok');
-            go('#/projects');
-          },
-        }, 'Unregister project'))))));
-}
-
 function newTaskModal(project, onCreated) {
   const title = h('input', { type: 'text', placeholder: 'e.g. Add a contact form to the landing page' });
   const desc = h('textarea', { rows: 5, placeholder: 'What should be done? Acceptance criteria, links, constraints…' });
   const est = h('input', { type: 'number', min: 0, step: 0.25, placeholder: 'Let the agent estimate' });
   const actions = h('textarea', { rows: 3, placeholder: 'Optional: initial action items, one per line' });
   const start = h('input', { type: 'checkbox', checked: true });
+  const assignee = h('select', {}, project.agents.map(a => h('option', { value: a.id }, `${'\u00a0\u00a0'.repeat(a.depth)}${a.depth ? '' : '👑 '}${a.name}`)));
+  const team = project.agents.length > 1;
   modal({
-    title: `New task for ${project.agent.name}`,
+    title: 'New task',
     wide: true,
     body: h('div', { class: 'form-grid' }, field('Title', title), field('Description', desc),
+      team ? field('Assign to', assignee, `${project.agent.name} (the lead) breaks the task down and delegates the parts to the team. Assign it to someone else to have them do it directly.`) : null,
       h('div', { class: 'form-grid two' }, field('Estimated total time (hours)', est), field('Upcoming action items', actions)),
-      h('label', { class: 'check' }, start, `Start ${project.agent.name} on this task right away`)),
+      h('label', { class: 'check' }, start, 'Start working on it right away')),
     actions: [{
       label: 'Create task', kind: 'primary', onClick: async () => {
         if (!title.value.trim()) { toast('A title is required.', 'error'); return false; }
@@ -633,6 +600,7 @@ function newTaskModal(project, onCreated) {
             title: title.value, description: desc.value,
             estimated_hours: est.value === '' ? null : +est.value,
             next_actions: actions.value.split('\n').map(s => s.trim()).filter(Boolean),
+            assignee_id: +assignee.value,
           });
           if (start.checked) await api('POST', `/api/tasks/${task.id}/run`, { message: '' });
           onCreated(task);
@@ -658,14 +626,19 @@ async function tasksTab(el, project, taskId) {
       listEl),
     detailEl));
 
-  const item = t => h('div', { class: `card task-item${t.id === taskId ? ' active' : ''}`, onclick: () => go(`#/projects/${project.id}/tasks/${t.id}`) },
-    h('div', { class: 'row' }, h('b', { class: 'grow ellipsis' }, t.title), t.running ? runDot() : null),
+  let rootId = null;  // the top-level task of the task on screen (a sub-task's tree stays highlighted)
+  const item = t => h('div', { class: `card task-item${t.id === taskId || t.id === rootId ? ' active' : ''}`, onclick: () => go(`#/projects/${project.id}/tasks/${t.id}`) },
+    h('div', { class: 'row' }, h('b', { class: 'grow ellipsis' }, t.title), t.open_questions ? h('span', { class: 'badge review', title: 'Questions for you' }, `❓ ${t.open_questions}`) : null, t.running || t.team_running ? runDot() : null),
     h('div', { class: 'row small muted' }, statusBadge(t.status), h('span', {}, `#${t.id}`), h('span', {}, `est. ${fmtHours(t.estimated_hours)}`), h('span', { class: 'grow', style: { textAlign: 'right' } }, `${t.progress}%`)),
-    progressBar(t.progress, t.status === 'done'));
+    progressBar(t.progress, t.status === 'done'),
+    h('div', { class: 'row small muted' },
+      t.assignee ? h('span', { class: 'ellipsis' }, `🤖 ${t.assignee.name}`) : null,
+      t.subtask_count ? h('span', {}, `🗂 ${t.subtasks_done}/${t.subtask_count} sub-tasks`) : null,
+      t.team_running ? h('span', {}, `👥 ${t.team_running} working`) : null));
   const renderList = () => {
     const shown = tasks.filter(t => filter === 'all' || t.status === filter);
     fill(listEl, ...(shown.length ? shown.map(item)
-      : [h('div', { class: 'card empty small' }, tasks.length ? 'No tasks with this status.' : 'No tasks yet. Create one and the project agent will carry it out.')]));
+      : [h('div', { class: 'card empty small' }, tasks.length ? 'No tasks with this status.' : `No tasks yet. Create one and ${project.agent.name} will plan it and put the team to work.`)]));
   };
   const refreshList = async () => {
     tasks = await api('GET', `/api/projects/${project.id}/tasks`, undefined, { quiet: true });
@@ -677,24 +650,31 @@ async function tasksTab(el, project, taskId) {
   let closed = false;
   const select = async id => {
     taskId = id;
+    rootId = null;
     renderList();
     detail?.dispose();
     detail = null;
     if (!id) {
       fill(detailEl, h('div', { class: 'card empty' }, h('div', { class: 'big' }, '✅'),
-        tasks.length ? 'Select a task to see its estimate, progress, insights, next actions and the agent’s work.' : 'Create a task to assign work to the project agent.'));
+        tasks.length ? 'Select a task to see its progress, sub-tasks, the team’s discussion and each agent’s work.' : 'Create a task to put the team to work.'));
       return;
     }
     const d = detail = new TaskDetail(detailEl, project, id, {
-      onChange: t => { const i = tasks.findIndex(x => x.id === t.id); if (i >= 0) tasks[i] = { ...tasks[i], ...t }; renderList(); },
+      onChange: t => {
+        const i = tasks.findIndex(x => x.id === t.id);
+        if (i >= 0) tasks[i] = { ...tasks[i], ...t };
+        if (t.id === taskId && rootId !== t.root_id) rootId = t.root_id;
+        renderList();
+      },
       onDeleted: () => go(`#/projects/${project.id}/tasks`),
+      onReassigned: () => select(id),
       onRunState: () => refreshList(),
     });
     if (closed) d.dispose();
     await d.load();
   };
   await select(taskId);
-  const timer = setInterval(() => { if (tasks.some(t => t.running)) refreshList().catch(() => {}); }, 4000);
+  const timer = setInterval(() => { if (tasks.some(t => t.running || t.team_running)) refreshList().catch(() => {}); }, 4000);
   return {
     select: async id => {
       if (closed) return;
@@ -713,6 +693,14 @@ class TaskDetail {
     this.cb = callbacks;
     this.info = h('div', { class: 'task-detail' });
     this.convHost = h('div', { class: 'task-conv' });
+    // While the agent or its team works, refresh sub-tasks, questions and the discussion.
+    this.timer = setInterval(() => {
+      if (this.task && (this.task.running || this.task.team_running || this.task.open_questions)) this.reload();
+    }, 4000);
+  }
+
+  get agent() {
+    return this.project.agents.find(a => a.id === this.task?.assignee?.id) || this.project.agent;
   }
 
   // Builds the detail off-screen and puts it in place once the task and its work log have loaded,
@@ -721,7 +709,9 @@ class TaskDetail {
     const task = await api('GET', `/api/tasks/${this.id}`);
     if (this.disposed) return;
     this.task = task;
-    const agent = this.project.agent;
+    const agent = this.agent;
+    this.discussion = discussionCard(this.id, task.discussion_count);
+    this.cb.onChange?.(task);
     this.render();
     const started = !!this.task.conversation_id;
     this.cv = new ConversationView(this.convHost, {
@@ -732,7 +722,7 @@ class TaskDetail {
       allowEmptySend: true,
       sendLabel: started ? 'Send' : '▶ Run agent',
       placeholder: started ? 'Message the agent, or press Send with no text to let it continue…' : 'Optional instructions for the agent, then press Run agent…',
-      emptyText: `${agent.name} has not worked on this task yet. Press "Run agent" to start.`,
+      emptyText: `${agent.name} has not worked on this task yet. Press "Run agent" to start.${this.project.agents.length > 1 && agent.depth === 0 ? ' As the lead, it will break the task down and delegate the parts to the team.' : ''}`,
       sendFn: async (text, images) => {
         const res = await api('POST', `/api/tasks/${this.id}/run`, { message: text, images });
         this.cv.setSendLabel('Send');
@@ -748,10 +738,10 @@ class TaskDetail {
     });
     await this.cv.load();
     if (this.disposed) return;
-    fill(this.el, h('div', { class: 'stack' }, this.info,
+    fill(this.el, h('div', { class: 'stack' }, this.info, this.discussion,
       h('div', { class: 'card pad-sm' },
         h('div', { class: 'row', style: { marginBottom: '8px' } },
-          h('h3', { class: 'grow', style: { margin: 0 } }, `🤖 ${agent.name} — work log`),
+          h('h3', { class: 'grow', style: { margin: 0 } }, `${agent.depth === 0 ? '👑' : '🤖'} ${agent.name} — work log`),
           h('span', { class: 'small muted' }, `${state.info?.engine === 'api' ? 'API' : 'Claude Code'} · ${agent.model} · effort ${agent.effort}`)),
         this.convHost)));
     this.cv.scrollToBottom(true);
@@ -765,6 +755,7 @@ class TaskDetail {
 
   async reload() {
     try { this.apply(await api('GET', `/api/tasks/${this.id}`, undefined, { quiet: true })); } catch { /* ignore */ }
+    this.discussion?.refresh(this.task.discussion_count);
   }
 
   async save(fields) {
@@ -800,10 +791,18 @@ class TaskDetail {
       return h('div', { class: 'add-row' }, input, h('button', { class: 'sm', onclick: add }, 'Add'));
     };
 
+    const agents = this.project.agents;
+    const assignee = agents.length > 1 ? h('select', { style: { width: 'auto' }, title: 'Assigned to', onchange: async e => { await this.save({ assignee_id: +e.target.value }); this.cb.onReassigned?.(); } },
+      agents.map(a => h('option', { value: a.id, selected: a.id === t.assignee?.id }, `${'\u00a0\u00a0'.repeat(a.depth)}${a.depth ? '🤖' : '👑'} ${a.name}`))) : null;
+    const pid = this.project.id;
     fill(this.info,
+      t.parent ? h('div', { class: 'small' }, '↑ Sub-task of ', h('a', { href: `#/projects/${pid}/tasks/${t.parent.id}` }, `#${t.parent.id} ${t.parent.title}`)) : null,
+      h('h2', { style: { margin: 0 } }, `#${t.id} · ${t.title}`),
       h('div', { class: 'row wrap' },
-        h('h2', { class: 'grow', style: { margin: 0 } }, `#${t.id} · ${t.title}`),
         t.running ? h('span', { class: 'badge accent' }, runDot(), 'agent working') : null,
+        t.team_running ? h('span', { class: 'badge accent' }, runDot(), `${t.team_running} teammate${t.team_running === 1 ? '' : 's'} working`) : null,
+        h('div', { class: 'grow' }),
+        assignee,
         statusBadge(t.status),
         h('button', { class: 'sm', onclick: () => this.edit() }, '✎ Edit'),
         h('button', { class: 'sm danger', title: 'Delete task', onclick: () => this.remove() }, '🗑')),
@@ -812,7 +811,15 @@ class TaskDetail {
         metric('Progress', h('div', { class: 'row' }, progress, h('span', { class: 'muted' }, '%')), progressBar(t.progress, t.status === 'done')),
         metric('Estimated total time', h('div', { class: 'row' }, estimate, h('span', { class: 'muted' }, 'h')), h('span', { class: 'small muted' }, t.estimated_hours != null ? `≈ ${fmtHours(t.estimated_hours)}` : 'not estimated yet')),
         metric('Agent time spent', h('span', { class: 'val' }, fmtDuration(t.time_spent_seconds)), h('span', { class: 'small muted' }, `updated ${timeAgo(t.updated_at)}`))),
+      questionsCard(t.questions || [], { currentTask: t.id, projectId: pid, onChange: () => this.reload() }),
       t.summary ? h('div', { class: 'card pad-sm' }, h('div', { class: 'small muted', style: { fontWeight: 600, marginBottom: '4px' } }, 'STATUS SUMMARY'), md(t.summary)) : null,
+      t.subtasks?.length ? h('div', { class: 'card pad-sm' },
+        h('h3', {}, `🗂 Sub-tasks (${t.subtasks.filter(x => x.status === 'done').length}/${t.subtasks.length} done)`),
+        h('div', { class: 'subtasks' }, t.subtasks.map(x => h('a', { class: 'subtask', href: `#/projects/${pid}/tasks/${x.id}` },
+          h('span', { class: 'row', style: { gap: '6px', minWidth: 0 } }, x.running || x.team_running ? runDot() : null, h('b', { class: 'ellipsis' }, `#${x.id} ${x.title}`)),
+          h('span', { class: 'small muted ellipsis' }, `🤖 ${x.assignee?.name || '—'}`, x.subtask_count ? ` · 🗂 ${x.subtasks_done}/${x.subtask_count}` : '', x.open_questions ? ` · ❓ ${x.open_questions}` : ''),
+          statusBadge(x.status),
+          progressBar(x.progress, x.status === 'done'))))) : null,
       h('details', { class: 'card pad-sm', open: !t.summary || undefined },
         h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, 'Description'),
         h('div', { style: { marginTop: '8px' } }, t.description ? md(t.description) : h('span', { class: 'muted' }, 'No description.'))),
@@ -857,7 +864,7 @@ class TaskDetail {
     this.cb.onDeleted?.();
   }
 
-  dispose() { this.disposed = true; this.cv?.dispose(); }
+  dispose() { this.disposed = true; clearInterval(this.timer); this.cv?.dispose(); }
 }
 
 // ================================================================ files
@@ -905,6 +912,7 @@ export async function settingsPage(view) {
     return h('div', {}, h('label', { class: 'check' }, input, h('b', {}, label)), hint ? h('div', { class: 'small muted', style: { marginLeft: '24px' } }, hint) : null);
   };
   const turns = h('input', { type: 'number', min: 1, max: 500, value: s.max_agent_turns, style: { width: '120px' } });
+  const parallel = h('input', { type: 'number', min: 1, max: 10, value: s.max_parallel_agents, style: { width: '120px' } });
   const keyStatus = s.api_key_set ? `A key ending in ${s.api_key_hint} is saved.` : s.env_key_present ? 'Using ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN from the server environment.' : 'No key configured yet.';
   fields.engine = h('select', { 'data-key': 'engine' },
     h('option', { value: 'claude_code', selected: s.engine === 'claude_code' }, 'Claude Code — your Claude subscription'),
@@ -917,7 +925,7 @@ export async function settingsPage(view) {
       : h('div', { class: 'notice warn' }, 'Claude Code is not logged in on this server. Open a terminal on the server, run ',
         h('code', {}, 'claude'), ' and log in with your Claude account.');
   const save = async () => {
-    const body = { max_agent_turns: +turns.value };
+    const body = { max_agent_turns: +turns.value, max_parallel_agents: +parallel.value };
     for (const [k, el] of Object.entries(fields)) body[k] = el.type === 'checkbox' ? el.checked : el.value;
     if (key.value.trim()) body.api_key = key.value.trim();
     await api('PUT', '/api/settings', body);
@@ -956,7 +964,8 @@ export async function settingsPage(view) {
         check('allow_commands', 'Allow agents to run shell commands', 'Developer and project agents can run commands (tests, builds, git) inside their workspace.'),
         check('use_fallback', 'Refusal fallback (API engine)', 'If a safety classifier declines a request, the API retries it on a recommended fallback model (not available for Haiku).'),
         check('chat_web_search', 'Web search in new chat conversations', 'Lets the chat agent search the web. Applies to conversations started after the change.'),
-        field('Maximum agent steps per run', turns, 'A run stops after this many model turns; send a message to let the agent continue.')),
+        field('Maximum agent steps per run', turns, 'A run stops after this many model turns; send a message to let the agent continue.'),
+        field('Agents working in parallel per lead', parallel, 'How many sub-tasks a team lead runs at the same time (1-10). Each runs its own agent session and uses its own share of your plan or API budget.')),
       h('div', {}, h('button', { class: 'primary', onclick: save }, 'Save settings')),
       h('div', { class: 'card' },
         h('h2', {}, 'About this server'),

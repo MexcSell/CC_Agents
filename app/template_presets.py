@@ -3,6 +3,10 @@ the template editor draws its context-dependent suggestions from (see templates.
 
 Each preset lists alternatives for its text fields (aliases for the name; several descriptions, roles
 and instructions); the first entry is the one installed. `subagents` are slugs of other presets.
+
+Templates are classified by functional area (AREAS) and, where it applies, by programming language
+(LANGUAGES). For every language a developer, a tech lead and a QA engineer template are generated.
+GROUPS are agent groups: hierarchical teams of templates that a project can be set up with.
 """
 
 CATEGORIES = [
@@ -164,7 +168,7 @@ PRESETS = [
     # ------------------------------------------------------------ Engineering
     {
         "slug": "backend-developer", "name": "Backend Developer", "category": "Engineering",
-        "aliases": ["Backend Engineer", "Server-side Developer", "API Developer", "Python Developer", "Node.js Developer"],
+        "aliases": ["Backend Engineer", "Server-side Developer", "API Developer"],
         "descriptions": [
             "Builds server-side features: APIs, business logic, data access, background jobs and integrations, with tests.",
             "Implements and maintains backend services and their data layer.",
@@ -734,7 +738,351 @@ PRESETS = [
     },
 ]
 
+# ---------------------------------------------------------------- functional areas
+
+AREAS = [
+    {"id": "manager", "name": "Manager", "icon": "🧭"},
+    {"id": "product", "name": "Product", "icon": "🎯"},
+    {"id": "architect", "name": "Architecture", "icon": "🏛"},
+    {"id": "lead", "name": "Tech lead", "icon": "⭐"},
+    {"id": "developer", "name": "Developer", "icon": "💻"},
+    {"id": "qa", "name": "QA & testing", "icon": "🧪"},
+    {"id": "reviewer", "name": "Code review", "icon": "🔍"},
+    {"id": "security", "name": "Security", "icon": "🔐"},
+    {"id": "performance", "name": "Performance", "icon": "⚡"},
+    {"id": "compliance", "name": "Compliance", "icon": "⚖"},
+    {"id": "designer", "name": "Design", "icon": "🎨"},
+    {"id": "writer", "name": "Writing", "icon": "✍"},
+    {"id": "localization", "name": "Localization", "icon": "🌐"},
+    {"id": "devops", "name": "DevOps", "icon": "⚙"},
+    {"id": "operations", "name": "Operations", "icon": "📟"},
+    {"id": "release", "name": "Release", "icon": "🚀"},
+    {"id": "support", "name": "Support", "icon": "💬"},
+    {"id": "research", "name": "Research", "icon": "🔎"},
+    {"id": "analyst", "name": "Analysis", "icon": "📐"},
+    {"id": "data", "name": "Data & ML", "icon": "📊"},
+]
+
+_AREA_OF = {
+    "project-manager": "manager", "product-manager": "product", "business-analyst": "analyst",
+    "technical-architect": "architect", "web-researcher": "research", "market-researcher": "research",
+    "backend-developer": "developer", "frontend-developer": "developer", "fullstack-developer": "developer",
+    "mobile-developer": "developer", "game-developer": "developer", "database-engineer": "developer",
+    "integration-engineer": "developer", "refactoring-specialist": "developer", "ux-designer": "designer",
+    "ui-designer": "designer", "art-director": "designer", "accessibility-specialist": "qa",
+    "technical-writer": "writer", "ux-writer": "writer", "localization-specialist": "localization",
+    "qa-lead": "qa", "test-automation-engineer": "qa", "code-reviewer": "reviewer", "security-engineer": "security",
+    "performance-engineer": "performance", "compliance-officer": "compliance", "devops-engineer": "devops",
+    "site-reliability-engineer": "operations", "cloud-engineer": "devops", "release-manager": "release",
+    "support-engineer": "support", "data-analyst": "data", "data-engineer": "data", "ml-engineer": "data",
+}
+for _p in PRESETS:
+    _p["area"] = _AREA_OF[_p["slug"]]
+    _p["language"] = ""
+
+
+# ---------------------------------------------------------------- languages
+
+LANGUAGES = [
+    {"id": "python", "name": "Python", "frameworks": ["Django", "FastAPI", "Flask", "asyncio"],
+     "tests": ["pytest", "Hypothesis"], "build": ["pip", "uv", "Poetry"], "lint": ["Ruff", "mypy"], "style": "PEP 8",
+     "extras": ["Type hints", "Packaging"],
+     "rules": ["Use type hints on public functions and keep mypy clean",
+               "Follow PEP 8 and format with the project's formatter",
+               "Use a virtual environment and pin dependencies",
+               "Prefer the standard library before adding packages"],
+     "qa_rules": ["Use pytest fixtures and parametrize for input variations",
+                  "Use Hypothesis property tests for parsers and data transformations"]},
+    {"id": "javascript", "name": "JavaScript", "frameworks": ["Node.js", "Express", "React", "Vue"],
+     "tests": ["Vitest", "Jest", "Playwright"], "build": ["npm", "pnpm", "Vite"], "lint": ["ESLint", "Prettier"],
+     "style": "the project's ESLint configuration", "extras": ["Asynchronous programming", "Browser APIs"],
+     "rules": ["Use const and let, never var; prefer async/await over callbacks",
+               "Handle every promise rejection",
+               "Do not add a dependency for a few lines of code",
+               "Lint and format with the project's ESLint and Prettier setup"],
+     "qa_rules": ["Test UI through user-visible behavior with Testing Library",
+                  "Cover critical user flows with Playwright end-to-end tests"]},
+    {"id": "typescript", "name": "TypeScript", "frameworks": ["Node.js", "React", "Next.js", "NestJS", "Angular"],
+     "tests": ["Vitest", "Jest", "Playwright"], "build": ["tsc", "pnpm", "Vite"], "lint": ["ESLint", "tsc --noEmit"],
+     "style": "strict TypeScript and the project's ESLint configuration", "extras": ["Type system design", "Runtime validation"],
+     "rules": ["Keep strict mode on; never use any without a comment explaining why",
+               "Model data with precise types and discriminated unions",
+               "Validate external input at runtime (e.g. with zod)",
+               "Type-check with tsc --noEmit before reporting done"],
+     "qa_rules": ["Type-check test code as well as product code",
+                  "Cover critical user flows with Playwright end-to-end tests"]},
+    {"id": "c", "name": "C", "frameworks": ["C11/C17", "POSIX", "Embedded systems"],
+     "tests": ["Unity", "CMocka", "Check"], "build": ["Make", "CMake", "GCC", "Clang"],
+     "lint": ["clang-tidy", "cppcheck", "Valgrind", "AddressSanitizer"], "style": "the project's style or MISRA C",
+     "extras": ["Memory management", "Systems programming"],
+     "rules": ["Check every return value and every allocation",
+               "Free every allocation on all paths; verify with Valgrind or AddressSanitizer",
+               "Never use unbounded string functions (strcpy, sprintf, gets)",
+               "Compile with -Wall -Wextra -Werror and fix every warning"],
+     "qa_rules": ["Run tests under AddressSanitizer and UndefinedBehaviorSanitizer",
+                  "Fuzz parsers and other input handling code"]},
+    {"id": "cpp", "name": "C++", "frameworks": ["C++17/20", "STL", "Boost", "Qt"],
+     "tests": ["GoogleTest", "Catch2"], "build": ["CMake", "Conan", "vcpkg"],
+     "lint": ["clang-tidy", "clang-format", "sanitizers"], "style": "the C++ Core Guidelines",
+     "extras": ["Memory management", "Templates and generic programming"],
+     "rules": ["Use RAII and smart pointers; no naked new or delete",
+               "Follow the C++ Core Guidelines",
+               "Prefer standard library containers and algorithms to hand-written ones",
+               "Build warning-free with sanitizers enabled in debug builds"],
+     "qa_rules": ["Run tests under sanitizers", "Benchmark hot paths with Google Benchmark"]},
+    {"id": "csharp", "name": "C#", "frameworks": [".NET", "ASP.NET Core", "Entity Framework Core", "Unity"],
+     "tests": ["xUnit", "NUnit"], "build": ["dotnet CLI", "NuGet"], "lint": ["Roslyn analyzers", "dotnet format"],
+     "style": ".NET naming and coding conventions", "extras": ["LINQ", "Dependency injection"],
+     "rules": ["Enable nullable reference types and fix their warnings",
+               "Use async/await end to end; never block on async code",
+               "Register services through dependency injection",
+               "Follow the .NET naming conventions"],
+     "qa_rules": ["Use xUnit theories for input variations",
+                  "Use WebApplicationFactory for API integration tests"]},
+    {"id": "java", "name": "Java", "frameworks": ["Spring Boot", "Jakarta EE", "Hibernate"],
+     "tests": ["JUnit 5", "Mockito", "Testcontainers"], "build": ["Maven", "Gradle"],
+     "lint": ["Checkstyle", "SpotBugs", "Error Prone"], "style": "the project's Checkstyle rules",
+     "extras": ["JVM", "Object-oriented design"],
+     "rules": ["Use constructor injection and immutable value objects",
+               "Never swallow exceptions; use checked exceptions deliberately",
+               "Keep methods short and classes cohesive",
+               "Follow the project's Checkstyle rules"],
+     "qa_rules": ["Use Testcontainers for database integration tests",
+                  "Mock only external boundaries with Mockito"]},
+    {"id": "go", "name": "Go", "frameworks": ["net/http", "gRPC", "Gin", "Cobra"],
+     "tests": ["go test", "testify"], "build": ["Go modules"], "lint": ["gofmt", "go vet", "staticcheck"],
+     "style": "Effective Go", "extras": ["Concurrency (goroutines and channels)", "Microservices architecture"],
+     "rules": ["Format with gofmt and keep go vet clean",
+               "Wrap returned errors with context (fmt.Errorf with %w); never ignore them",
+               "Pass context.Context through every call that does I/O",
+               "Keep goroutines bounded and always stoppable"],
+     "qa_rules": ["Write table-driven tests", "Run the tests with -race"]},
+    {"id": "rust", "name": "Rust", "frameworks": ["Tokio", "Axum", "Serde"],
+     "tests": ["cargo test", "proptest", "criterion"], "build": ["Cargo"], "lint": ["Clippy", "rustfmt"],
+     "style": "the Rust API guidelines", "extras": ["Ownership and borrowing", "Systems programming"],
+     "rules": ["Keep Clippy clean and format with rustfmt",
+               "Avoid unwrap and expect outside tests; propagate errors with ?",
+               "Minimize unsafe and document the invariants of every unsafe block",
+               "Prefer borrowing to cloning"],
+     "qa_rules": ["Use property tests (proptest) for parsers and invariants",
+                  "Benchmark with criterion before and after optimizations"]},
+    {"id": "kotlin", "name": "Kotlin", "frameworks": ["Android", "Jetpack Compose", "Ktor", "Coroutines"],
+     "tests": ["JUnit 5", "Kotest", "MockK", "Espresso"], "build": ["Gradle"], "lint": ["ktlint", "detekt"],
+     "style": "the Kotlin coding conventions", "extras": ["Android development", "Coroutines and Flow"],
+     "rules": ["Prefer immutable data classes and null safety over !!",
+               "Use coroutines with structured concurrency",
+               "Keep UI logic out of activities and composables (MVVM)",
+               "Follow the Kotlin coding conventions"],
+     "qa_rules": ["Use MockK for mocks and test flows with Turbine or Kotest",
+                  "Run instrumented UI tests with Espresso or Compose testing"]},
+    {"id": "swift", "name": "Swift", "frameworks": ["SwiftUI", "UIKit", "Swift Concurrency"],
+     "tests": ["XCTest", "Swift Testing", "XCUITest"], "build": ["Swift Package Manager", "Xcode"],
+     "lint": ["SwiftLint", "SwiftFormat"], "style": "the Swift API Design Guidelines",
+     "extras": ["iOS development", "App store publishing"],
+     "rules": ["Avoid force unwrapping; handle optionals explicitly",
+               "Use Swift concurrency (async/await, actors) for asynchronous work",
+               "Keep views small and state in observable models",
+               "Follow the Swift API Design Guidelines"],
+     "qa_rules": ["Cover critical flows with XCUITest", "Test on several device sizes and OS versions"]},
+    {"id": "php", "name": "PHP", "frameworks": ["Laravel", "Symfony", "WordPress"],
+     "tests": ["PHPUnit", "Pest"], "build": ["Composer"], "lint": ["PHPStan", "PHP-CS-Fixer"], "style": "PSR-12",
+     "extras": ["Web application security", "SQL and relational databases"],
+     "rules": ["Declare strict_types and use type declarations",
+               "Follow the PSR-12 coding style",
+               "Use prepared statements or the ORM; never build SQL from input",
+               "Escape all output in templates"],
+     "qa_rules": ["Isolate tests with database transactions or refreshes",
+                  "Keep PHPStan clean at the project's level"]},
+    {"id": "ruby", "name": "Ruby", "frameworks": ["Ruby on Rails", "Sinatra", "Sidekiq"],
+     "tests": ["RSpec", "Minitest", "Capybara"], "build": ["Bundler", "Rake"], "lint": ["RuboCop"],
+     "style": "the Ruby style guide", "extras": ["Metaprogramming", "SQL and relational databases"],
+     "rules": ["Follow the Ruby style guide and keep RuboCop clean",
+               "Keep controllers thin; put logic in models or service objects",
+               "Avoid N+1 queries; use includes",
+               "Use migrations for every schema change"],
+     "qa_rules": ["Build test data with factories (FactoryBot)",
+                  "Write system tests with Capybara for user flows"]},
+]
+
+
+def _language_presets(lang: dict) -> list[dict]:
+    n, i = lang["name"], lang["id"]
+    tools = (f"build with {', '.join(lang['build'])}, test with {', '.join(lang['tests'])}, "
+             f"lint with {', '.join(lang['lint'])}")
+    common = {"language": i, "model": ""}
+    return [
+        {**common, "slug": f"{i}-developer", "name": f"{n} Developer", "category": "Engineering", "area": "developer",
+         "aliases": [f"{n} Engineer", f"{n} Programmer"],
+         "descriptions": [f"Writes, tests and maintains {n} code: features, bug fixes and refactorings, following "
+                          f"{n} idioms and the project's conventions."],
+         "roles": [f"Senior {n} developer who writes idiomatic, well-tested code"],
+         "expertise": [n, *lang["frameworks"][:3], *lang["extras"], "Debugging"],
+         "skills": [f"Writing idiomatic {n}", f"Writing unit tests with {lang['tests'][0]}", "Debugging", "Refactoring",
+                    f"Dependency management with {lang['build'][0]}", f"Static analysis with {lang['lint'][0]}",
+                    "Code review"],
+         "rules": [*lang["rules"], "Write tests for every change and run them before reporting done",
+                   "Follow the existing code style and conventions of the repository"],
+         "subagents": [f"{i}-qa-engineer", "code-reviewer"],
+         "instructions": [f"Use the project's {n} toolchain: {tools}. Run the tests and linters before reporting "
+                          "done, and summarize what changed and why."],
+         "effort": "high"},
+        {**common, "slug": f"{i}-tech-lead", "name": f"{n} Tech Lead", "category": "Engineering", "area": "lead",
+         "aliases": [f"Lead {n} Developer", f"{n} Architect", f"Senior {n} Engineer"],
+         "descriptions": [f"Leads {n} development: designs the approach, splits the work among {n} developers, "
+                          "reviews their code and keeps quality and conventions high."],
+         "roles": [f"{n} tech lead who designs solutions, delegates and reviews code"],
+         "expertise": [n, "Software architecture", *lang["frameworks"][:2], "Code review", "Technical leadership"],
+         "skills": ["Breaking work into tasks", "Design review", "Code review", f"Setting up {n} tooling",
+                    "Mentoring", "Estimating effort"],
+         "rules": ["Agree on the approach before work starts and write it down",
+                   "Split work so that developers can proceed in parallel with few conflicts",
+                   "Review every change before accepting it",
+                   lang["rules"][0], "Keep the build, tests and linters green"],
+         "subagents": ["code-reviewer", "security-engineer"],
+         "instructions": [f"Plan the {n} work, delegate implementation to your developers with clear acceptance "
+                          f"criteria, review the results against {lang['style']} and the project's conventions, "
+                          "and request changes until they meet them."],
+         "effort": "high"},
+        {**common, "slug": f"{i}-qa-engineer", "name": f"{n} QA Engineer", "category": "Quality & safety", "area": "qa",
+         "aliases": [f"{n} Test Engineer", f"{n} SDET"],
+         "descriptions": [f"Tests {n} code: writes automated tests with {lang['tests'][0]}, finds edge cases and "
+                          "reports bugs with reproductions."],
+         "roles": [f"QA engineer specialized in testing {n} software"],
+         "expertise": [n, "Software testing and QA", *lang["tests"][:2], "Test automation", "Continuous integration"],
+         "skills": [f"Writing tests with {lang['tests'][0]}", "Writing integration tests", "Exploratory testing",
+                    "Writing bug reports", "Fixing flaky tests", "Measuring test coverage"],
+         "rules": [*lang["qa_rules"], "Every bug report has steps to reproduce, expected and actual results",
+                   "Tests must be deterministic: no sleeps, real clocks or shared state",
+                   "Test edge cases, invalid input and error paths, not just the happy path"],
+         "subagents": [],
+         "instructions": [f"Run the existing {n} test suite first, then add tests for the change under test. Report "
+                          "results as a table of cases with pass or fail, plus bugs ranked by severity."],
+         "effort": "medium"},
+    ]
+
+
+for _lang in LANGUAGES:
+    PRESETS.extend(_language_presets(_lang))
+
+
+# ---------------------------------------------------------------- agent groups
+
+def _team(root):
+    """Flatten a (template, name, [children]) tree into group members with unique keys."""
+    members, used = [], set()
+
+    def walk(node, parent):
+        template, name, children = node if len(node) == 3 else (*node, [])
+        key = base = "-".join("".join(c if c.isalnum() else " " for c in name.lower()).split())
+        n = 2
+        while key in used:
+            key, n = f"{base}-{n}", n + 1
+        used.add(key)
+        members.append({"key": key, "template": template, "name": name, "parent": parent})
+        for child in children:
+            walk(child, key)
+
+    walk(root, None)
+    return members
+
+
+def _language_team(lang: dict) -> dict:
+    n, i = lang["name"], lang["id"]
+    return {
+        "slug": f"{i}-team", "name": f"{n} Team", "category": "Language teams",
+        "description": f"A {n} development team: a project manager leads a {n} tech lead with two developers and a "
+                       "code reviewer, a QA lead with a QA engineer, and a release manager.",
+        "members": _team(("project-manager", "Project Manager", [
+            (f"{i}-tech-lead", f"{n} Tech Lead", [
+                (f"{i}-developer", f"Senior {n} Developer"),
+                (f"{i}-developer", f"{n} Developer"),
+                ("code-reviewer", "Code Reviewer")]),
+            ("qa-lead", "QA Lead", [(f"{i}-qa-engineer", f"{n} QA Engineer")]),
+            ("release-manager", "Release Manager")])),
+    }
+
+
+GROUPS = [_language_team(lang) for lang in LANGUAGES] + [
+    {"slug": "fullstack-web-team", "name": "Full-stack Web Team", "category": "Product teams",
+     "description": "A complete web product team: product and UX, a TypeScript frontend and a Python backend under an "
+                    "architect, database, QA, DevOps and release.",
+     "members": _team(("project-manager", "Project Manager", [
+         ("product-manager", "Product Manager", [("ux-designer", "UX Designer", [("ui-designer", "UI Designer")])]),
+         ("technical-architect", "Technical Architect", [
+             ("typescript-tech-lead", "Frontend Lead", [("typescript-developer", "Frontend Developer")]),
+             ("python-tech-lead", "Backend Lead", [("python-developer", "Backend Developer")]),
+             ("database-engineer", "Database Engineer")]),
+         ("qa-lead", "QA Lead", [("typescript-qa-engineer", "Frontend QA Engineer"),
+                                 ("python-qa-engineer", "Backend QA Engineer")]),
+         ("devops-engineer", "DevOps Engineer"),
+         ("release-manager", "Release Manager")]))},
+    {"slug": "mobile-app-team", "name": "Mobile App Team", "category": "Product teams",
+     "description": "Native iOS and Android apps: product and design, a Swift and a Kotlin squad, QA and release.",
+     "members": _team(("project-manager", "Project Manager", [
+         ("product-manager", "Product Manager"),
+         ("ux-designer", "UX Designer", [("ui-designer", "UI Designer")]),
+         ("swift-tech-lead", "iOS Lead", [("swift-developer", "iOS Developer")]),
+         ("kotlin-tech-lead", "Android Lead", [("kotlin-developer", "Android Developer")]),
+         ("qa-lead", "QA Lead", [("swift-qa-engineer", "iOS QA Engineer"), ("kotlin-qa-engineer", "Android QA Engineer")]),
+         ("release-manager", "Release Manager")]))},
+    {"slug": "data-ml-team", "name": "Data & ML Team", "category": "Product teams",
+     "description": "Data pipelines, analysis and machine learning in Python, with QA.",
+     "members": _team(("project-manager", "Project Manager", [
+         ("python-tech-lead", "Python Tech Lead", [
+             ("data-engineer", "Data Engineer"), ("ml-engineer", "Machine Learning Engineer"),
+             ("python-developer", "Python Developer")]),
+         ("data-analyst", "Data Analyst"),
+         ("python-qa-engineer", "Python QA Engineer")]))},
+    {"slug": "game-studio-team", "name": "Game Studio Team", "category": "Product teams",
+     "description": "A small game studio: art direction, gameplay programming in C# and C++, QA and performance.",
+     "members": _team(("project-manager", "Producer", [
+         ("art-director", "Art Director", [("ui-designer", "UI Artist")]),
+         ("csharp-tech-lead", "Lead Programmer", [
+             ("game-developer", "Gameplay Programmer"), ("csharp-developer", "C# Developer"),
+             ("cpp-developer", "Engine Programmer")]),
+         ("qa-lead", "QA Lead", [("csharp-qa-engineer", "Game Tester")]),
+         ("performance-engineer", "Performance Engineer")]))},
+    {"slug": "systems-team", "name": "Systems & Embedded Team", "category": "Product teams",
+     "description": "Low-level software in C, C++ and Rust, with security and performance specialists.",
+     "members": _team(("project-manager", "Project Manager", [
+         ("technical-architect", "Systems Architect", [
+             ("c-tech-lead", "C Tech Lead", [("c-developer", "C Developer"), ("cpp-developer", "C++ Developer")]),
+             ("rust-developer", "Rust Developer")]),
+         ("c-qa-engineer", "C QA Engineer"),
+         ("security-engineer", "Security Engineer"),
+         ("performance-engineer", "Performance Engineer")]))},
+    {"slug": "security-audit-team", "name": "Security Audit Team", "category": "Specialist teams",
+     "description": "Audits a codebase for vulnerabilities, compliance gaps and risky code, and fixes what it finds.",
+     "members": _team(("security-engineer", "Lead Security Engineer", [
+         ("code-reviewer", "Code Reviewer"), ("compliance-officer", "Compliance Officer"),
+         ("test-automation-engineer", "Security Test Engineer")]))},
+    {"slug": "platform-team", "name": "DevOps & Platform Team", "category": "Specialist teams",
+     "description": "Builds and runs the platform: cloud infrastructure, CI/CD, reliability and security.",
+     "members": _team(("cloud-engineer", "Platform Lead", [
+         ("devops-engineer", "DevOps Engineer"), ("site-reliability-engineer", "Site Reliability Engineer"),
+         ("security-engineer", "Security Engineer")]))},
+    {"slug": "docs-localization-team", "name": "Docs & Localization Team", "category": "Specialist teams",
+     "description": "Documentation, interface copy, translation and accessibility of a product.",
+     "members": _team(("technical-writer", "Documentation Lead", [
+         ("ux-writer", "UX Writer"), ("localization-specialist", "Localization Specialist"),
+         ("accessibility-specialist", "Accessibility Specialist")]))},
+    {"slug": "research-team", "name": "Research & Discovery Team", "category": "Specialist teams",
+     "description": "Explores a problem space: market, users, data and requirements, ending in a recommendation.",
+     "members": _team(("product-manager", "Research Lead", [
+         ("market-researcher", "Market Researcher", [("web-researcher", "Web Researcher")]),
+         ("business-analyst", "Business Analyst"), ("data-analyst", "Data Analyst"), ("ux-designer", "UX Researcher")]))},
+    {"slug": "qa-team", "name": "Quality Assurance Team", "category": "Specialist teams",
+     "description": "Tests a product end to end: automation, performance, security and accessibility.",
+     "members": _team(("qa-lead", "QA Lead", [
+         ("test-automation-engineer", "Test Automation Engineer"), ("performance-engineer", "Performance Engineer"),
+         ("security-engineer", "Security Tester"), ("accessibility-specialist", "Accessibility Tester")]))},
+]
+
+
 _slugs = {p["slug"] for p in PRESETS}
 assert len(_slugs) == len(PRESETS), "duplicate preset slug"
 assert all(s in _slugs for p in PRESETS for s in p["subagents"]), "preset refers to an unknown internal agent"
 assert all(p["category"] in {c["name"] for c in CATEGORIES} for p in PRESETS), "preset with unknown category"
+assert all(p["area"] in {a["id"] for a in AREAS} for p in PRESETS), "preset with unknown area"
+assert len({g["slug"] for g in GROUPS}) == len(GROUPS), "duplicate group slug"
+assert all(m["template"] in _slugs for g in GROUPS for m in g["members"]), "group refers to an unknown template"

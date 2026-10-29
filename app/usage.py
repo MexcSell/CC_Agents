@@ -177,7 +177,8 @@ def resolve_model(scope: str | None, project_id: int | None) -> str:
     project agents without a project); chat by default."""
     settings = db.get_settings()
     if scope == "project":
-        agent = project_id and db.one("SELECT model FROM agents WHERE project_id = ?", (project_id,))
+        agent = project_id and db.one("SELECT model FROM agents WHERE project_id = ? ORDER BY parent_id IS NOT NULL, "
+                                      "sort, id", (project_id,))
         return agent["model"] if agent else settings["project_model"]
     return settings["dev_model"] if scope == "dev" else settings["chat_model"]
 

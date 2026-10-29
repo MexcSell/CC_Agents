@@ -36,12 +36,17 @@ CREATE TABLE IF NOT EXISTS projects (
 );
 CREATE TABLE IF NOT EXISTS agents (
     id INTEGER PRIMARY KEY,
-    project_id INTEGER NOT NULL UNIQUE REFERENCES projects(id) ON DELETE CASCADE,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    parent_id INTEGER,               -- the agent it reports to; NULL for the project's lead (manager)
+    key TEXT NOT NULL DEFAULT '',    -- short handle, unique in the project, used by agents to address it
+    sort INTEGER NOT NULL DEFAULT 0,
     name TEXT NOT NULL,
     role TEXT NOT NULL DEFAULT '',
     instructions TEXT NOT NULL DEFAULT '',
     model TEXT NOT NULL,
     effort TEXT NOT NULL,
+    template TEXT NOT NULL DEFAULT '',
+    subagents TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -57,6 +62,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     insights TEXT NOT NULL DEFAULT '[]',
     next_actions TEXT NOT NULL DEFAULT '[]',
     summary TEXT NOT NULL DEFAULT '',
+    parent_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
+    assignee_id INTEGER,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -90,6 +97,8 @@ CREATE TABLE IF NOT EXISTS agent_templates (
     slug TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
     category TEXT NOT NULL DEFAULT '',
+    area TEXT NOT NULL DEFAULT '',
+    language TEXT NOT NULL DEFAULT '',
     description TEXT NOT NULL DEFAULT '',
     role TEXT NOT NULL DEFAULT '',
     instructions TEXT NOT NULL DEFAULT '',
@@ -102,10 +111,58 @@ CREATE TABLE IF NOT EXISTS agent_templates (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS agent_groups (
+    id INTEGER PRIMARY KEY,
+    slug TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    members TEXT NOT NULL DEFAULT '[]',   -- [{key, template, name, parent}], parent = key of the member above
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS discussions (
+    id INTEGER PRIMARY KEY,
+    root_task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    task_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
+    sender TEXT NOT NULL,
+    recipient TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL,                   -- plan, delegate, report, review, question, answer, learning, note
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS questions (
+    id INTEGER PRIMARY KEY,
+    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    root_task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    agent_id INTEGER,
+    agent_name TEXT NOT NULL,
+    question TEXT NOT NULL,
+    options TEXT NOT NULL DEFAULT '[]',
+    answer TEXT,
+    status TEXT NOT NULL DEFAULT 'open',  -- open, answered, dismissed
+    created_at TEXT NOT NULL,
+    answered_at TEXT
+);
+CREATE TABLE IF NOT EXISTS learnings (
+    id INTEGER PRIMARY KEY,
+    project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+    agent_id INTEGER,
+    template TEXT NOT NULL DEFAULT '',
+    scope TEXT NOT NULL,                  -- self (one agent), team (a project's agents), role (a template, everywhere)
+    text TEXT NOT NULL,
+    task_id INTEGER,
+    author TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, id);
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_conv_kind ON conversations(kind, topic_id, task_id);
+CREATE INDEX IF NOT EXISTS idx_discussions_root ON discussions(root_task_id, id);
 """
+
+AGENT_COLUMNS = ("id, project_id, parent_id, key, sort, name, role, instructions, model, effort, template, subagents, "
+                 "created_at, updated_at")
 
 with _lock:
     _conn.executescript(SCHEMA)
@@ -119,8 +176,41 @@ with _lock:
         _conn.execute("ALTER TABLE agents ADD COLUMN template TEXT NOT NULL DEFAULT ''")
     if "subagents" not in agent_cols:  # JSON list of template slugs: the agent's internal agents
         _conn.execute("ALTER TABLE agents ADD COLUMN subagents TEXT NOT NULL DEFAULT '[]'")
-    if "category" not in {r["name"] for r in _conn.execute("PRAGMA table_info(agent_templates)")}:
-        _conn.execute("ALTER TABLE agent_templates ADD COLUMN category TEXT NOT NULL DEFAULT ''")
+    template_cols = {r["name"] for r in _conn.execute("PRAGMA table_info(agent_templates)")}
+    for col in ("category", "area", "language"):
+        if col not in template_cols:
+            _conn.execute(f"ALTER TABLE agent_templates ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+    task_cols = {r["name"] for r in _conn.execute("PRAGMA table_info(tasks)")}
+    if "parent_id" not in task_cols:
+        _conn.execute("ALTER TABLE tasks ADD COLUMN parent_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE")
+    if "assignee_id" not in task_cols:
+        _conn.execute("ALTER TABLE tasks ADD COLUMN assignee_id INTEGER")
+    # Projects used to have exactly one agent (UNIQUE project_id). Rebuild the table as a team table;
+    # each existing agent becomes its project's lead.
+    if any(ix["unique"] and ix["origin"] == "u" for ix in _conn.execute("PRAGMA index_list(agents)")):
+        _conn.executescript(f"""
+            PRAGMA foreign_keys=OFF;
+            BEGIN;
+            CREATE TABLE agents_new (
+                id INTEGER PRIMARY KEY,
+                project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                parent_id INTEGER, key TEXT NOT NULL DEFAULT '', sort INTEGER NOT NULL DEFAULT 0,
+                name TEXT NOT NULL, role TEXT NOT NULL DEFAULT '', instructions TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL, effort TEXT NOT NULL, template TEXT NOT NULL DEFAULT '',
+                subagents TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+            INSERT INTO agents_new({AGENT_COLUMNS})
+                SELECT id, project_id, NULL, '', 0, name, role, instructions, model, effort, template, subagents,
+                       created_at, updated_at FROM agents;
+            DROP TABLE agents;
+            ALTER TABLE agents_new RENAME TO agents;
+            COMMIT;
+            PRAGMA foreign_keys=ON;
+        """)
+    for row in _conn.execute("SELECT id, name FROM agents WHERE key = ''").fetchall():
+        key = "-".join("".join(c if c.isalnum() else " " for c in row["name"].lower()).split()) or f"agent-{row['id']}"
+        _conn.execute("UPDATE agents SET key = ? WHERE id = ?", (key, row["id"]))
+    _conn.execute("UPDATE tasks SET assignee_id = (SELECT a.id FROM agents a WHERE a.project_id = tasks.project_id "
+                  "AND a.parent_id IS NULL ORDER BY a.sort, a.id LIMIT 1) WHERE assignee_id IS NULL")
 
 
 def now() -> str:
@@ -175,7 +265,10 @@ DEFAULT_SETTINGS = {
     "chat_web_search": False,
     "allow_commands": True,
     "max_agent_turns": 80,
-    "templates_seeded": False,   # the starter agent templates were installed once
+    "templates_seeded": False,   # the first starter templates were installed (before presets_seen existed)
+    "presets_seen": [],          # starter templates offered once already (deleted ones are not brought back)
+    "group_presets_seen": [],    # the same for starter agent groups
+    "max_parallel_agents": 3,    # sub-tasks a lead runs at the same time
 }
 
 
@@ -295,9 +388,51 @@ def add_task_event(tid: int, source: str, text: str) -> None:
 
 
 def get_project(pid: int) -> dict | None:
+    """A project with its team: `agents` in hierarchy order (each with `depth`), `agent` = the lead."""
     project = one("SELECT * FROM projects WHERE id = ?", (pid,))
     if project:
-        project["agent"] = agent = one("SELECT * FROM agents WHERE project_id = ?", (pid,))
-        if agent:
-            agent["subagents"] = json.loads(agent["subagents"])
+        project["agents"] = list_agents(pid)
+        project["agent"] = project["agents"][0] if project["agents"] else None
     return project
+
+
+def _agent_row(row: dict | None) -> dict | None:
+    if row:
+        row["subagents"] = json.loads(row["subagents"])
+    return row
+
+
+def get_agent(aid: int) -> dict | None:
+    return _agent_row(one("SELECT * FROM agents WHERE id = ?", (aid,)))
+
+
+def list_agents(pid: int) -> list[dict]:
+    """A project's agents depth-first from the lead (the agent without a parent), each with `depth`.
+    Agents whose parent is missing are attached to the lead."""
+    rows = [_agent_row(r) for r in query("SELECT * FROM agents WHERE project_id = ? ORDER BY sort, id", (pid,))]
+    if not rows:
+        return []
+    ids = {r["id"] for r in rows}
+    roots = [r for r in rows if r["parent_id"] not in ids]
+    lead = roots[0]
+    children: dict[int, list[dict]] = {}
+    for r in rows:
+        if r is lead:
+            continue
+        parent = r["parent_id"] if r["parent_id"] in ids else lead["id"]
+        children.setdefault(parent, []).append(r)
+    out = []
+
+    def walk(agent, depth):
+        agent["depth"] = depth
+        agent["parent_id"] = None if depth == 0 else agent["parent_id"] if agent["parent_id"] in ids else lead["id"]
+        out.append(agent)
+        for child in children.get(agent["id"], []):
+            walk(child, depth + 1)
+
+    walk(lead, 0)
+    seen = {a["id"] for a in out}
+    for r in rows:   # unreachable because of a cycle: show under the lead
+        if r["id"] not in seen:
+            out.append({**r, "depth": 1, "parent_id": lead["id"]})
+    return out

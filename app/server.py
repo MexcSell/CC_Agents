@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Res
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import agents, db, fsops, images, maintenance, runs, templates, usage
+from . import agents, db, fsops, groups, images, maintenance, runs, team, templates, usage
 from .config import (ACCESS_TOKEN, APP_ROOT, EFFORTS, HOST, MODELS, PORT, RESTART_EXIT_CODE,
                      STATIC_DIR)
 
@@ -62,6 +62,16 @@ async def image_error(_: Request, exc: images.ImageError):
 
 @app.exception_handler(templates.TemplateError)
 async def template_error(_: Request, exc: templates.TemplateError):
+    return JSONResponse({"detail": str(exc)}, status_code=400)
+
+
+@app.exception_handler(groups.GroupError)
+async def group_error(_: Request, exc: groups.GroupError):
+    return JSONResponse({"detail": str(exc)}, status_code=400)
+
+
+@app.exception_handler(team.TeamError)
+async def team_error(_: Request, exc: team.TeamError):
     return JSONResponse({"detail": str(exc)}, status_code=400)
 
 
@@ -118,6 +128,7 @@ def dashboard():
             "SELECT t.id, t.title, t.status, t.progress, t.updated_at, p.name AS project, p.id AS project_id "
             "FROM tasks t JOIN projects p ON p.id = t.project_id ORDER BY t.updated_at DESC LIMIT 8"),
         "has_credentials": _has_credentials(),
+        "questions": list_questions("open")[:10],
         "engine": db.get_settings()["engine"],
     }
 
@@ -239,6 +250,8 @@ def put_settings(body: dict = Body(...)):
             clean[key] = bool(value)
         elif key == "max_agent_turns":
             clean[key] = max(1, min(int(value), 500))
+        elif key == "max_parallel_agents":
+            clean[key] = max(1, min(int(value), 10))
     if body.get("clear_api_key"):
         clean["api_key"] = ""
     db.save_settings(clean)
@@ -448,7 +461,8 @@ def export_conversation(cid: int):
 
 @app.get("/api/runs")
 def list_runs():
-    return {"active": runs.active_runs(), "recent": runs.recent_runs()}
+    return {"active": runs.active_runs(), "recent": runs.recent_runs(),
+            "open_questions": db.one("SELECT COUNT(*) n FROM questions WHERE status = 'open'")["n"]}
 
 
 @app.post("/api/runs/{run_id}/cancel")
@@ -495,6 +509,7 @@ class AgentIn(BaseModel):
     effort: str = "high"
     template: str = ""            # symbol of the agent template it is based on, e.g. "@code-reviewer"
     subagents: list[str] = []     # symbols of the templates that become its internal agents
+    parent_id: int | None = None  # the agent it reports to (team members); ignored for the lead
 
 
 class ProjectIn(BaseModel):
@@ -502,7 +517,8 @@ class ProjectIn(BaseModel):
     description: str = ""
     repo_path: str
     create_repo: bool = False
-    agent: AgentIn | None = None
+    group: str = ""               # symbol of an agent group: the project gets that whole team
+    agent: AgentIn | None = None  # without a group: the single agent (with a group: default model and effort)
 
 
 class ProjectPatch(BaseModel):
@@ -510,6 +526,12 @@ class ProjectPatch(BaseModel):
     description: str = ""
     repo_path: str
     create_repo: bool = False
+
+
+class TeamIn(BaseModel):
+    group: str
+    model: str = ""
+    effort: str = ""
 
 
 def _check_agent(a: AgentIn) -> None:
@@ -543,36 +565,83 @@ def _project_or_404(pid: int) -> dict:
     return db.get_project(pid) or not_found("Project not found")
 
 
+def _agent_or_404(aid: int) -> dict:
+    return db.get_agent(aid) or not_found("Agent not found")
+
+
+def _unique_key(pid: int, name: str, exclude: int | None = None) -> str:
+    taken = {r["key"] for r in db.query("SELECT key FROM agents WHERE project_id = ? AND id IS NOT ?", (pid, exclude))}
+    key = base = groups.slugify(name) or "agent"
+    n = 2
+    while key in taken:
+        key, n = f"{base}-{n}", n + 1
+    return key
+
+
+def _insert_team(pid: int, group: dict, model: str, effort: str, ts: str) -> int:
+    """Create a group's members as the agents of project `pid` (inside a transaction). Returns the lead's id."""
+    tpl = {t["slug"]: t for t in db.query("SELECT slug, role, model, effort FROM agent_templates")}
+    ids: dict[str, int] = {}
+    for i, m in enumerate(group["members"]):
+        t = tpl.get(m["template"], {})
+        ids[m["key"]] = db._conn.execute(
+            "INSERT INTO agents(project_id, parent_id, key, sort, name, role, instructions, model, effort, template, "
+            "subagents, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, '', ?, ?, ?, '[]', ?, ?)",
+            (pid, ids.get(m["parent"]), m["key"], i, m["name"], t.get("role", ""), t.get("model") or model,
+             t.get("effort") or effort, m["template"], ts, ts)).lastrowid
+    return ids[group["members"][0]["key"]]
+
+
+def _group_or_400(symbol: str) -> dict:
+    group = groups.by_slug(symbol)
+    if not group:
+        raise HTTPException(400, f"Unknown agent group {groups.symbol(groups.parse_symbol(symbol))}")
+    return group
+
+
+def _running_task_ids() -> set[int]:
+    return {r["task_id"] for r in runs.active_runs() if r["kind"] == "task" and r["task_id"]}
+
+
 @app.get("/api/projects")
 def list_projects():
     projects = db.query("SELECT * FROM projects ORDER BY updated_at DESC")
+    running = _running_task_ids()
     for p in projects:
-        p["agent"] = db.one("SELECT id, name, model, effort, template FROM agents WHERE project_id = ?", (p["id"],))
+        agents_ = db.list_agents(p["id"])
+        p["agent"] = agents_[0] if agents_ else None
+        p["agent_count"] = len(agents_)
         stats = db.one("SELECT COUNT(*) total, SUM(status = 'done') done, SUM(status = 'in_progress') active, "
-                       "AVG(progress) avg_progress, SUM(estimated_hours) est FROM tasks WHERE project_id = ?",
-                       (p["id"],))
+                       "AVG(progress) avg_progress, SUM(estimated_hours) est FROM tasks "
+                       "WHERE project_id = ? AND parent_id IS NULL", (p["id"],))
         p["stats"] = {k: (v or 0) for k, v in stats.items()}
-        p["running"] = sum(1 for r in runs.active_runs() if r["kind"] == "task" and r["task_id"] in
-                           {t["id"] for t in db.query("SELECT id FROM tasks WHERE project_id = ?", (p["id"],))})
+        p["running"] = sum(1 for t in db.query("SELECT id FROM tasks WHERE project_id = ?", (p["id"],))
+                           if t["id"] in running)
+        p["open_questions"] = db.one("SELECT COUNT(*) n FROM questions q JOIN tasks t ON t.id = q.task_id "
+                                     "WHERE t.project_id = ? AND q.status = 'open'", (p["id"],))["n"]
         p["repo_exists"] = Path(p["repo_path"]).is_dir()
     return projects
 
 
 @app.post("/api/projects")
 def create_project(body: ProjectIn):
-    agent = body.agent or AgentIn()
+    agent = body.agent or AgentIn(model=db.get_settings()["project_model"], effort=db.get_settings()["project_effort"])
     _check_agent(agent)
+    group = _group_or_400(body.group) if body.group.strip() else None
     repo = _check_repo(body.repo_path, body.create_repo)
     ts = db.now()
     with db.transaction():
         pid = db._conn.execute(
             "INSERT INTO projects(name, description, repo_path, created_at, updated_at) VALUES(?, ?, ?, ?, ?)",
             (body.name.strip(), body.description, repo, ts, ts)).lastrowid
-        db._conn.execute(
-            "INSERT INTO agents(project_id, name, role, instructions, model, effort, template, subagents, "
-            "created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (pid, agent.name.strip(), agent.role, agent.instructions, agent.model, agent.effort, agent.template,
-             json.dumps(agent.subagents), ts, ts))
+        if group:
+            _insert_team(pid, group, agent.model, agent.effort, ts)
+        else:
+            db._conn.execute(
+                "INSERT INTO agents(project_id, key, name, role, instructions, model, effort, template, subagents, "
+                "created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (pid, groups.slugify(agent.name) or "lead", agent.name.strip(), agent.role, agent.instructions,
+                 agent.model, agent.effort, agent.template, json.dumps(agent.subagents), ts, ts))
     return _project_or_404(pid)
 
 
@@ -592,15 +661,140 @@ def update_project(pid: int, body: ProjectPatch):
     return _project_or_404(pid)
 
 
-@app.put("/api/projects/{pid}/agent")
-def update_agent(pid: int, body: AgentIn):
-    _project_or_404(pid)
+def _save_agent(aid: int, body: AgentIn) -> None:
+    agent = _agent_or_404(aid)
     _check_agent(body)
+    team = db.list_agents(agent["project_id"])
+    parent = agent["parent_id"]
+    if team and team[0]["id"] != aid and body.parent_id:
+        if body.parent_id == aid or body.parent_id in {a["id"] for a in team_reports(team, aid)}:
+            raise HTTPException(400, "An agent cannot report to itself or to someone who reports to it")
+        if body.parent_id not in {a["id"] for a in team}:
+            raise HTTPException(400, "The agent it reports to is not in this project")
+        parent = body.parent_id
     db.execute("UPDATE agents SET name = ?, role = ?, instructions = ?, model = ?, effort = ?, template = ?, "
-               "subagents = ?, updated_at = ? WHERE project_id = ?",
+               "subagents = ?, parent_id = ?, key = ?, updated_at = ? WHERE id = ?",
                (body.name.strip(), body.role, body.instructions, body.model, body.effort, body.template,
-                json.dumps(body.subagents), db.now(), pid))
+                json.dumps(body.subagents), parent, _unique_key(agent["project_id"], body.name, aid), db.now(), aid))
+
+
+def team_reports(team: list[dict], aid: int) -> list[dict]:
+    from .team import reports_of
+    return reports_of(team, aid)
+
+
+@app.put("/api/projects/{pid}/agent")
+def update_lead(pid: int, body: AgentIn):
+    """Update the project's lead agent."""
+    p = _project_or_404(pid)
+    _save_agent(p["agent"]["id"], body)
     return _project_or_404(pid)
+
+
+@app.post("/api/projects/{pid}/agents")
+def add_agent(pid: int, body: AgentIn):
+    p = _project_or_404(pid)
+    _check_agent(body)
+    parent = body.parent_id if body.parent_id in {a["id"] for a in p["agents"]} else p["agent"]["id"]
+    ts = db.now()
+    db.execute("INSERT INTO agents(project_id, parent_id, key, sort, name, role, instructions, model, effort, template, "
+               "subagents, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+               (pid, parent, _unique_key(pid, body.name), len(p["agents"]), body.name.strip(), body.role,
+                body.instructions, body.model, body.effort, body.template, json.dumps(body.subagents), ts, ts))
+    return _project_or_404(pid)
+
+
+@app.put("/api/agents/{aid}")
+def update_agent(aid: int, body: AgentIn):
+    _save_agent(aid, body)
+    return _project_or_404(_agent_or_404(aid)["project_id"])
+
+
+@app.delete("/api/agents/{aid}")
+def delete_agent(aid: int):
+    """Remove a team member. Its reports and its tasks move to the agent it reported to."""
+    agent = _agent_or_404(aid)
+    team = db.list_agents(agent["project_id"])
+    if team[0]["id"] == aid:
+        raise HTTPException(400, "The lead cannot be removed. Apply another group or change the lead's settings.")
+    with db.transaction():
+        db._conn.execute("UPDATE agents SET parent_id = ? WHERE parent_id = ?", (agent["parent_id"], aid))
+        db._conn.execute("UPDATE tasks SET assignee_id = ? WHERE assignee_id = ?", (agent["parent_id"], aid))
+        db._conn.execute("DELETE FROM learnings WHERE scope = 'self' AND agent_id = ?", (aid,))
+        db._conn.execute("DELETE FROM agents WHERE id = ?", (aid,))
+    return _project_or_404(agent["project_id"])
+
+
+@app.put("/api/projects/{pid}/team")
+def apply_group(pid: int, body: TeamIn):
+    """Replace the project's team with an agent group. Tasks move to the new lead."""
+    p = _project_or_404(pid)
+    group = _group_or_400(body.group)
+    if any(t["id"] in _running_task_ids() for t in db.query("SELECT id FROM tasks WHERE project_id = ?", (pid,))):
+        raise HTTPException(409, "Agents are working on this project. Wait for them or stop them first.")
+    s = db.get_settings()
+    model = body.model if body.model in MODEL_IDS else p["agent"]["model"] if p["agent"] else s["project_model"]
+    effort = body.effort if body.effort in EFFORTS else p["agent"]["effort"] if p["agent"] else s["project_effort"]
+    with db.transaction():
+        db._conn.execute("DELETE FROM learnings WHERE scope = 'self' AND agent_id IN "
+                         "(SELECT id FROM agents WHERE project_id = ?)", (pid,))
+        db._conn.execute("DELETE FROM agents WHERE project_id = ?", (pid,))
+        lead = _insert_team(pid, group, model, effort, db.now())
+        db._conn.execute("UPDATE tasks SET assignee_id = ? WHERE project_id = ?", (lead, pid))
+    return _project_or_404(pid)
+
+
+@app.delete("/api/projects/{pid}")
+def delete_project(pid: int):
+    """Unregister the project. Files in its repository are never touched."""
+    _project_or_404(pid)
+    _cancel_conversations("SELECT c.id FROM conversations c JOIN tasks t ON t.id = c.task_id "
+                          "WHERE t.project_id = ?", (pid,))
+    db.execute("DELETE FROM learnings WHERE project_id = ? AND scope != 'role'", (pid,))
+    db.execute("DELETE FROM projects WHERE id = ?", (pid,))
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- learnings
+
+class LearningIn(BaseModel):
+    text: str = Field(min_length=1, max_length=2000)
+    scope: str = "team"           # self (one agent: agent_id), team, role (the agent's template, all projects)
+    agent_id: int | None = None
+
+
+@app.get("/api/projects/{pid}/learnings")
+def project_learnings(pid: int):
+    """Lessons of this project's agents and team, and the role lessons of the templates its agents use."""
+    p = _project_or_404(pid)
+    used = sorted({a["template"] for a in p["agents"] if a["template"]})
+    marks = ",".join("?" * len(used)) or "''"
+    return db.query(f"SELECT * FROM learnings WHERE (project_id = ? AND scope != 'role') "
+                    f"OR (scope = 'role' AND template IN ({marks})) ORDER BY id DESC", (pid, *used))
+
+
+@app.post("/api/projects/{pid}/learnings")
+def add_learning(pid: int, body: LearningIn):
+    p = _project_or_404(pid)
+    agent = next((a for a in p["agents"] if a["id"] == body.agent_id), None)
+    if body.scope not in ("self", "team", "role"):
+        raise HTTPException(400, "scope must be self, team or role")
+    if body.scope in ("self", "role") and not agent:
+        raise HTTPException(400, "Choose the agent this lesson is for")
+    if body.scope == "role" and not agent["template"]:
+        raise HTTPException(400, f"{agent['name']} is not based on a template")
+    db.execute("INSERT INTO learnings(project_id, agent_id, template, scope, text, task_id, author, created_at) "
+               "VALUES(?, ?, ?, ?, ?, NULL, 'user', ?)",
+               (pid, agent["id"] if agent else None, agent["template"] if agent else "", body.scope,
+                " ".join(body.text.split()), db.now()))
+    return project_learnings(pid)
+
+
+@app.delete("/api/learnings/{lid}")
+def delete_learning(lid: int):
+    db.one("SELECT id FROM learnings WHERE id = ?", (lid,)) or not_found("Lesson not found")
+    db.execute("DELETE FROM learnings WHERE id = ?", (lid,))
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------- agent templates
@@ -609,6 +803,8 @@ class TemplateIn(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     slug: str = ""                # the symbol, with or without "@"; derived from the name when empty
     category: str = ""
+    area: str = ""                # functional area, e.g. "developer" (see template_presets.AREAS)
+    language: str = ""            # programming language, e.g. "python" (see template_presets.LANGUAGES)
     description: str = ""
     role: str = ""
     instructions: str = ""
@@ -641,6 +837,8 @@ class TemplateDraft(BaseModel):
     """A template being edited, as far as it is filled in."""
     slug: str = ""
     category: str = ""
+    area: str = ""
+    language: str = ""
     name: str = ""
     description: str = ""
     role: str = ""
@@ -659,7 +857,9 @@ def suggest_template_values(body: TemplateDraft):
 @app.get("/api/templates/presets")
 def template_presets():
     """The starter template library: its categories and which of its templates are installed."""
-    return {"categories": templates.presets.CATEGORIES, "presets": templates.preset_status()}
+    return {"categories": templates.presets.CATEGORIES, "areas": templates.presets.AREAS,
+            "languages": [{"id": l["id"], "name": l["name"]} for l in templates.presets.LANGUAGES],
+            "presets": templates.preset_status()}
 
 
 class PresetInstall(BaseModel):
@@ -696,13 +896,62 @@ def delete_template(tid: int):
     return {"ok": True}
 
 
-@app.delete("/api/projects/{pid}")
-def delete_project(pid: int):
-    """Unregister the project. Files in its repository are never touched."""
-    _project_or_404(pid)
-    _cancel_conversations("SELECT c.id FROM conversations c JOIN tasks t ON t.id = c.task_id "
-                          "WHERE t.project_id = ?", (pid,))
-    db.execute("DELETE FROM projects WHERE id = ?", (pid,))
+# ---------------------------------------------------------------- agent groups
+
+class GroupMemberIn(BaseModel):
+    key: str = ""
+    template: str
+    name: str = ""
+    parent: str | None = None
+
+
+class GroupIn(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    slug: str = ""
+    category: str = ""
+    description: str = ""
+    members: list[GroupMemberIn] = []
+
+
+def _group_or_404(gid: int) -> dict:
+    return groups.get(gid) or not_found("Group not found")
+
+
+@app.get("/api/groups")
+def list_groups():
+    return groups.list_all()
+
+
+@app.get("/api/groups/presets")
+def group_presets():
+    return groups.preset_status()
+
+
+@app.post("/api/groups/presets/install")
+def install_group_presets(body: PresetInstall):
+    return {"installed": groups.install_presets(body.slugs)}
+
+
+@app.post("/api/groups")
+def create_group(body: GroupIn):
+    return groups.save(body.model_dump())
+
+
+@app.get("/api/groups/{gid}")
+def get_group(gid: int):
+    return _group_or_404(gid)
+
+
+@app.put("/api/groups/{gid}")
+def update_group(gid: int, body: GroupIn):
+    _group_or_404(gid)
+    return groups.save(body.model_dump(), gid)
+
+
+@app.delete("/api/groups/{gid}")
+def delete_group(gid: int):
+    _group_or_404(gid)
+    groups.delete(gid)
     return {"ok": True}
 
 
@@ -713,6 +962,7 @@ class TaskIn(BaseModel):
     description: str = ""
     estimated_hours: float | None = None
     next_actions: list[str] = []
+    assignee_id: int | None = None    # default: the project's lead
 
 
 class TaskPatch(BaseModel):
@@ -725,6 +975,7 @@ class TaskPatch(BaseModel):
     summary: str | None = None
     insights: list[dict] | None = None
     next_actions: list[dict] | None = None
+    assignee_id: int | None = None
 
 
 class TaskRunIn(BaseModel):
@@ -732,42 +983,68 @@ class TaskRunIn(BaseModel):
     images: list[str] = []
 
 
-TASK_STATUSES = {"todo", "in_progress", "blocked", "review", "done"}
+TASK_STATUSES = {"todo", "in_progress", "blocked", "review", "done", "cancelled"}
 
 
 def _task_or_404(tid: int) -> dict:
     return db.get_task(tid) or not_found("Task not found")
 
 
-def _task_conversation(tid: int) -> dict | None:
-    row = db.one("SELECT id FROM conversations WHERE task_id = ? ORDER BY id DESC LIMIT 1", (tid,))
-    return db.get_conversation(row["id"]) if row else None
+def _subtree(tid: int) -> list[int]:
+    return [r["id"] for r in db.query("WITH RECURSIVE sub(id) AS (SELECT ? UNION ALL SELECT t.id FROM tasks t "
+                                      "JOIN sub ON t.parent_id = sub.id) SELECT id FROM sub", (tid,))]
 
 
-def _with_runtime(task: dict) -> dict:
-    conv = _task_conversation(task["id"])
+def _with_runtime(task: dict, running: set[int] | None = None, names: dict | None = None) -> dict:
+    running = _running_task_ids() if running is None else running
+    conv = team.task_conversation(task["id"])
     task["conversation_id"] = conv["id"] if conv else None
     run = runs.active_for(conv["id"]) if conv else None
     task["running"] = run is not None
     task["run_id"] = run.id if run else None
+    tree = _subtree(task["id"])
+    task["team_running"] = sum(1 for t in tree[1:] if t in running)
+    counts = db.one("SELECT COUNT(*) n, SUM(status = 'done') done FROM tasks WHERE parent_id = ?", (task["id"],))
+    task["subtask_count"], task["subtasks_done"] = counts["n"], counts["done"] or 0
+    marks = ",".join("?" * len(tree))
+    task["open_questions"] = db.one(f"SELECT COUNT(*) n FROM questions WHERE status = 'open' AND task_id IN ({marks})",
+                                    tree)["n"]
+    if names is None:
+        names = {a["id"]: a for a in db.query("SELECT id, name, key FROM agents WHERE project_id = ?",
+                                              (task["project_id"],))}
+    who = names.get(task["assignee_id"])
+    task["assignee"] = {"id": who["id"], "name": who["name"], "key": who["key"]} if who else None
     return task
 
 
 @app.get("/api/projects/{pid}/tasks")
-def list_tasks(pid: int):
+def list_tasks(pid: int, all: bool = False):
+    """The project's tasks: the ones the user created (top level), or with all=1 every sub-task too."""
     _project_or_404(pid)
-    return [_with_runtime(t) for t in db.list_tasks(pid)]
+    running = _running_task_ids()
+    names = {a["id"]: a for a in db.query("SELECT id, name, key FROM agents WHERE project_id = ?", (pid,))}
+    return [_with_runtime(t, running, names) for t in db.list_tasks(pid) if all or not t["parent_id"]]
+
+
+def _check_assignee(pid: int, aid: int | None) -> int:
+    p = _project_or_404(pid)
+    if aid is None:
+        return p["agent"]["id"]
+    if aid not in {a["id"] for a in p["agents"]}:
+        raise HTTPException(400, "The assignee is not an agent of this project")
+    return aid
 
 
 @app.post("/api/projects/{pid}/tasks")
 def create_task(pid: int, body: TaskIn):
-    _project_or_404(pid)
+    assignee_id = _check_assignee(pid, body.assignee_id)
     ts = db.now()
     actions = json.dumps([{"text": a, "done": False} for a in body.next_actions if a.strip()])
-    tid = db.execute("INSERT INTO tasks(project_id, title, description, estimated_hours, next_actions, "
-                     "created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
-                     (pid, body.title.strip(), body.description, body.estimated_hours, actions, ts, ts))
-    db.add_task_event(tid, "user", "Task created and assigned to the project agent")
+    tid = db.execute("INSERT INTO tasks(project_id, assignee_id, title, description, estimated_hours, next_actions, "
+                     "created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                     (pid, assignee_id, body.title.strip(), body.description, body.estimated_hours, actions, ts, ts))
+    name = db.get_agent(assignee_id)["name"]
+    db.add_task_event(tid, "user", f"Task created and assigned to {name}")
     return _with_runtime(db.get_task(tid))
 
 
@@ -775,13 +1052,36 @@ def create_task(pid: int, body: TaskIn):
 def get_task(tid: int):
     task = _with_runtime(_task_or_404(tid))
     task["events"] = db.query("SELECT * FROM task_events WHERE task_id = ? ORDER BY id DESC LIMIT 200", (tid,))
+    running = _running_task_ids()
+    names = {a["id"]: a for a in db.query("SELECT id, name, key FROM agents WHERE project_id = ?", (task["project_id"],))}
+    task["subtasks"] = [_with_runtime(db.get_task(r["id"]), running, names)
+                        for r in db.query("SELECT id FROM tasks WHERE parent_id = ? ORDER BY id", (tid,))]
+    parent = db.get_task(task["parent_id"]) if task["parent_id"] else None
+    task["parent"] = {"id": parent["id"], "title": parent["title"]} if parent else None
+    tree = _subtree(tid)
+    marks = ",".join("?" * len(tree))
+    task["questions"] = db.query(f"SELECT * FROM questions WHERE task_id IN ({marks}) ORDER BY status = 'open' DESC, "
+                                 f"id DESC LIMIT 50", tree)
+    for q in task["questions"]:
+        q["options"] = json.loads(q["options"])
+    task["root_id"] = team.root_of(task)["id"]
+    task["discussion_count"] = db.one("SELECT COUNT(*) n FROM discussions WHERE root_task_id = ?",
+                                      (task["root_id"],))["n"]
     return task
+
+
+@app.get("/api/tasks/{tid}/discussion")
+def task_discussion(tid: int):
+    """The team discussion of the task tree the task belongs to."""
+    root = team.root_of(_task_or_404(tid))
+    return db.query("SELECT d.*, t.title AS task_title FROM discussions d LEFT JOIN tasks t ON t.id = d.task_id "
+                    "WHERE d.root_task_id = ? ORDER BY d.id", (root["id"],))
 
 
 @app.put("/api/tasks/{tid}")
 def update_task(tid: int, body: TaskPatch):
     task = _task_or_404(tid)
-    fields = body.model_dump(exclude_none=True, exclude={"clear_estimate"})
+    fields = body.model_dump(exclude_none=True, exclude={"clear_estimate", "assignee_id"})
     if "status" in fields and fields["status"] not in TASK_STATUSES:
         raise HTTPException(400, f"status must be one of {sorted(TASK_STATUSES)}")
     if "progress" in fields:
@@ -794,6 +1094,10 @@ def update_task(tid: int, body: TaskPatch):
     if "next_actions" in fields:
         fields["next_actions"] = [{"text": str(a.get("text", "")), "done": bool(a.get("done"))}
                                   for a in fields["next_actions"] if a.get("text")]
+    if body.assignee_id is not None and body.assignee_id != task["assignee_id"]:
+        aid = _check_assignee(task["project_id"], body.assignee_id)
+        db.execute("UPDATE tasks SET assignee_id = ? WHERE id = ?", (aid, tid))
+        db.add_task_event(tid, "user", f"Reassigned to {db.get_agent(aid)['name']}")
     updated = db.update_task(tid, fields)
     changed = [k for k in fields if task.get(k) != updated.get(k)]
     if changed:
@@ -804,33 +1108,51 @@ def update_task(tid: int, body: TaskPatch):
 @app.delete("/api/tasks/{tid}")
 def delete_task(tid: int):
     _task_or_404(tid)
-    _cancel_conversations("SELECT id FROM conversations WHERE task_id = ?", (tid,))
+    tree = _subtree(tid)
+    _cancel_conversations(f"SELECT id FROM conversations WHERE task_id IN ({','.join('?' * len(tree))})", tree)
     db.execute("DELETE FROM tasks WHERE id = ?", (tid,))
     return {"ok": True}
 
 
 @app.post("/api/tasks/{tid}/run")
 def run_task(tid: int, body: TaskRunIn):
-    task = _task_or_404(tid)
-    project = _project_or_404(task["project_id"])
-    if not Path(project["repo_path"]).is_dir():
-        raise HTTPException(400, f"The project repository {project['repo_path']} does not exist")
-    conv = _task_conversation(tid)
-    if conv is None:
-        conv = db.create_conversation("task", f"Task #{tid}: {task['title']}",
-                                      agents.task_system_prompt(project, project["agent"]), task_id=tid)
-        content = agents.task_kickoff_message(task, body.message)
-    else:
-        content = agents.task_followup_message(task, body.message, conv, project)
-    content = _user_content(conv["id"], content, body.images)
-    if task["status"] == "todo":
-        db.update_task(tid, {"status": "in_progress"})
+    """Start the task's assignee on it, or send it the next message."""
+    _task_or_404(tid)
     try:
-        run = runs.start(conv["id"], "task", conv["title"], content, agents.task_spec(project, tid), task_id=tid)
+        run, conv = team.start_task(tid, body.message, body.images)
     except runs.RunBusy as e:
         raise HTTPException(409, str(e))
-    db.add_task_event(tid, "user", "Agent run started" + (f": {body.message.strip()[:200]}" if body.message.strip() else ""))
     return {"run": run.info(), "conversation_id": conv["id"]}
+
+
+# ---------------------------------------------------------------- questions to the user
+
+class AnswerIn(BaseModel):
+    answer: str = Field(min_length=1)
+
+
+@app.get("/api/questions")
+def list_questions(status: str = "open", project_id: int | None = None):
+    sql = ("SELECT q.*, t.title AS task_title, t.project_id, p.name AS project FROM questions q "
+           "JOIN tasks t ON t.id = q.task_id JOIN projects p ON p.id = t.project_id WHERE q.status = ?")
+    params: list = [status]
+    if project_id is not None:
+        sql += " AND t.project_id = ?"
+        params.append(project_id)
+    rows = db.query(sql + " ORDER BY q.id DESC LIMIT 200", params)
+    for r in rows:
+        r["options"] = json.loads(r["options"])
+    return rows
+
+
+@app.post("/api/questions/{qid}/answer")
+def answer_question(qid: int, body: AnswerIn):
+    return team.answer_question(qid, body.answer.strip())
+
+
+@app.post("/api/questions/{qid}/dismiss")
+def dismiss_question(qid: int):
+    return team.answer_question(qid, None)
 
 
 # ---------------------------------------------------------------- file system
@@ -939,6 +1261,7 @@ def main() -> None:
     maintenance.on_restart(stop)
     images.prune()
     templates.seed_once()
+    groups.seed_once()
     log.info("Agent Group listening on http://%s:%s (supervised=%s)", HOST, PORT, maintenance.under_supervisor())
     server.run()
     runs.cancel_all()
